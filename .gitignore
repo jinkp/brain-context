@@ -1,0 +1,25 @@
+.DS_Store
+Thumbs.db
+
+# Go
+bin/
+dist/
+coverage.out
+*.test
+
+# Local env
+.env
+.env.*
+
+# IDEs
+.idea/
+.vscode/
+
+# Brain local config
+.brain/
+
+# Docker
+pgdata/
+
+# SDD internal artifacts
+.atl/
