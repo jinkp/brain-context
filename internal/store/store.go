@@ -83,7 +83,15 @@ func New(ctx context.Context, databaseURL string) (*Store, error) {
 		return nil, fmt.Errorf("database url is required")
 	}
 
-	pool, err := pgxpool.New(ctx, databaseURL)
+	cfg, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse database url: %w", err)
+	}
+	// Disable TLS for local development if not explicitly configured
+	if cfg.ConnConfig.TLSConfig != nil && strings.Contains(databaseURL, "sslmode=disable") {
+		cfg.ConnConfig.TLSConfig = nil
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("create pgx pool: %w", err)
 	}
