@@ -73,6 +73,7 @@ type CreateProjectParams struct {
 	DefaultBranch   string
 	EmbedModel      string
 	EmbedDimensions int
+	EmbedAPIKeyEnc  string // optional: AES-256-GCM encrypted embed API key
 }
 
 func New(ctx context.Context, databaseURL string) (*Store, error) {
@@ -285,11 +286,17 @@ func (s *Store) CreateProject(ctx context.Context, tenantID uuid.UUID, params Cr
 			Status:          "active",
 		}
 
+		// Use nullable for embed_api_key_enc
+		var embedKeyEnc *string
+		if params.EmbedAPIKeyEnc != "" {
+			embedKeyEnc = &params.EmbedAPIKeyEnc
+		}
+
 		if err := tx.QueryRow(ctx, `
-			insert into projects (id, tenant_id, name, repository_url, default_branch, embed_model, embed_dimensions, status)
-			values ($1, $2, $3, $4, $5, $6, $7, $8)
+			insert into projects (id, tenant_id, name, repository_url, default_branch, embed_model, embed_dimensions, status, embed_api_key_enc)
+			values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			returning created_at
-		`, project.ID, project.TenantID, project.Name, project.RepositoryURL, project.DefaultBranch, project.EmbedModel, project.EmbedDimensions, project.Status).Scan(&project.CreatedAt); err != nil {
+		`, project.ID, project.TenantID, project.Name, project.RepositoryURL, project.DefaultBranch, project.EmbedModel, project.EmbedDimensions, project.Status, embedKeyEnc).Scan(&project.CreatedAt); err != nil {
 			return classifyError(err)
 		}
 		return nil

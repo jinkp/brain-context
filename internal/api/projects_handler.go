@@ -57,32 +57,44 @@ func (h *Handler) CreateProject(c echo.Context) error {
 		return writeError(c, http.StatusBadRequest, "VALIDATION_ERROR", "embed_dimensions must be one of 768, 1024, or 3072")
 	}
 
-	project, err := h.store.CreateProject(c.Request().Context(), tenantID, store.CreateProjectParams{
-		Name:            req.Name,
-		RepositoryURL:   req.RepositoryURL,
-		DefaultBranch:   req.DefaultBranch,
-		EmbedModel:      req.EmbedModel,
-		EmbedDimensions: req.EmbedDimensions,
-	})
-	if err != nil {
-		return handleStoreError(c, err)
-	}
-
-	// If an embed API key was provided, encrypt and store it
+	// Encrypt embed API key if provided
+	var embedKeyEnc string
 	if strings.TrimSpace(req.EmbedAPIKey) != "" {
 		if !crypto.IsConfigured() {
+			// Create project without key, warn the user
+			project, err := h.store.CreateProject(c.Request().Context(), tenantID, store.CreateProjectParams{
+				Name:            req.Name,
+				RepositoryURL:   req.RepositoryURL,
+				DefaultBranch:   req.DefaultBranch,
+				EmbedModel:      req.EmbedModel,
+				EmbedDimensions: req.EmbedDimensions,
+			})
+			if err != nil {
+				return handleStoreError(c, err)
+			}
 			return c.JSON(http.StatusCreated, map[string]any{
+				"id":      project.ID,
 				"project": project,
-				"warning": "BRAIN_ENCRYPTION_KEY not set on server — embed_api_key was NOT stored. Set the env var and re-run: brain register --project " + req.Name + " --embed-api-key <key>",
+				"warning": "BRAIN_ENCRYPTION_KEY not set on server — embed_api_key was NOT stored",
 			})
 		}
 		enc, err := crypto.Encrypt(strings.TrimSpace(req.EmbedAPIKey))
 		if err != nil {
 			return writeError(c, http.StatusInternalServerError, "ENCRYPT_FAILED", "failed to encrypt embed api key")
 		}
-		if err := h.store.SaveEmbedAPIKey(c.Request().Context(), tenantID, project.ID, enc); err != nil {
-			return handleStoreError(c, err)
-		}
+		embedKeyEnc = enc
+	}
+
+	project, err := h.store.CreateProject(c.Request().Context(), tenantID, store.CreateProjectParams{
+		Name:            req.Name,
+		RepositoryURL:   req.RepositoryURL,
+		DefaultBranch:   req.DefaultBranch,
+		EmbedModel:      req.EmbedModel,
+		EmbedDimensions: req.EmbedDimensions,
+		EmbedAPIKeyEnc:  embedKeyEnc,
+	})
+	if err != nil {
+		return handleStoreError(c, err)
 	}
 
 	return c.JSON(http.StatusCreated, project)
