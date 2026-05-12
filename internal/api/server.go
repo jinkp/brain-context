@@ -31,6 +31,8 @@ func NewServer(st *store.Store) *echo.Echo {
 	tenantOnly.POST("/projects", h.CreateProject)
 	tenantOnly.GET("/projects/:id", h.GetProject)
 	tenantOnly.POST("/projects/:id/tokens", h.CreateProjectTokens)
+	tenantOnly.GET("/projects/:id/tokens", h.ListProjectTokens)
+	tenantOnly.POST("/projects/:id/tokens/renew", h.RenewProjectTokens)
 
 	projectOnly := authed.Group("", RequireScopes(auth.ScopeProject))
 	projectOnly.POST("/projects/:id/chunks", h.UploadChunks)

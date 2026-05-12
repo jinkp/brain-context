@@ -80,6 +80,8 @@ func main() {
 		err = runMCP(os.Args[2:])
 	case "setup":
 		err = runSetup(os.Args[2:])
+	case "tokens":
+		err = runTokens(os.Args[2:])
 	case "version":
 		fmt.Println(version)
 		return
@@ -342,13 +344,179 @@ func runSetupTUI() error {
 
 func printUsage() {
 	fmt.Fprintln(os.Stderr, "Usage:")
-	fmt.Fprintln(os.Stderr, "  brain login    --token <tenant-api-key> [--api http://localhost:8080]")
-	fmt.Fprintln(os.Stderr, "  brain register --project <name> --repo <path> --embedder <gemini|openai|ollama> --api-key <key> --model <model>")
-	fmt.Fprintln(os.Stderr, "  brain index    --project <name>")
-	fmt.Fprintln(os.Stderr, "  brain update   --project <name>")
-	fmt.Fprintln(os.Stderr, "  brain mcp      [--project <name>]")
-	fmt.Fprintln(os.Stderr, "  brain setup    <client>   clients: opencode, claude, cursor, gemini, windsurf, all")
+	fmt.Fprintln(os.Stderr, "  brain login          --token <tenant-api-key> [--api http://localhost:8080]")
+	fmt.Fprintln(os.Stderr, "  brain register       --project <name> --repo <path> --embedder <gemini|openai|ollama> --api-key <key> --model <model>")
+	fmt.Fprintln(os.Stderr, "  brain index          --project <name>")
+	fmt.Fprintln(os.Stderr, "  brain update         --project <name>")
+	fmt.Fprintln(os.Stderr, "  brain tokens list    --project <name>")
+	fmt.Fprintln(os.Stderr, "  brain tokens renew   --project <name>")
+	fmt.Fprintln(os.Stderr, "  brain mcp            [--project <name>]")
+	fmt.Fprintln(os.Stderr, "  brain setup          [client]  clients: opencode, claude, cursor, gemini, windsurf, all")
 	fmt.Fprintln(os.Stderr, "  brain version")
+}
+
+// ── tokens ───────────────────────────────────────────────────────────────────
+
+type listTokensResponse struct {
+	Tokens []tokenInfo `json:"tokens"`
+}
+
+type tokenInfo struct {
+	ID        string    `json:"id"`
+	Prefix    string    `json:"prefix"`
+	Scope     string    `json:"scope"`
+	ExpiresAt time.Time `json:"expires_at"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type renewTokensResponse struct {
+	Message      string        `json:"message"`
+	ProjectToken tokenEnvelope `json:"project_token"`
+	MCPReadKey   tokenEnvelope `json:"mcp_read_key"`
+}
+
+func runTokens(args []string) error {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage:")
+		fmt.Fprintln(os.Stderr, "  brain tokens list  --project <name>")
+		fmt.Fprintln(os.Stderr, "  brain tokens renew --project <name>")
+		return fmt.Errorf("subcommand required: list or renew")
+	}
+
+	switch args[0] {
+	case "list":
+		return runTokensList(args[1:])
+	case "renew":
+		return runTokensRenew(args[1:])
+	default:
+		return fmt.Errorf("unknown subcommand %q — use list or renew", args[0])
+	}
+}
+
+func runTokensList(args []string) error {
+	fs := flag.NewFlagSet("tokens list", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	projectName := fs.String("project", "", "project name")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("parse flags: %w", err)
+	}
+	if strings.TrimSpace(*projectName) == "" {
+		return fmt.Errorf("--project is required")
+	}
+
+	_, projectID, tenantToken, apiEndpoint, err := loadProjectConfig(*projectName)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		apiEndpoint+"/api/projects/"+projectID+"/tokens", nil)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+tenantToken)
+
+	var resp listTokensResponse
+	if _, err := doJSON(req, &resp); err != nil {
+		return fmt.Errorf("list tokens: %w", err)
+	}
+
+	if len(resp.Tokens) == 0 {
+		fmt.Println("No active tokens found for project", *projectName)
+		return nil
+	}
+
+	fmt.Printf("Active tokens for project %q:\n\n", *projectName)
+	fmt.Printf("  %-12s  %-36s  %-10s  %s\n", "SCOPE", "ID", "PREFIX", "EXPIRES")
+	fmt.Printf("  %-12s  %-36s  %-10s  %s\n",
+		"────────────", "────────────────────────────────────",
+		"──────────", "───────────────────────")
+	for _, t := range resp.Tokens {
+		fmt.Printf("  %-12s  %-36s  %-10s  %s\n",
+			t.Scope, t.ID, t.Prefix[:min(len(t.Prefix), 20)]+"...",
+			t.ExpiresAt.Format("2006-01-02"))
+	}
+	fmt.Println()
+	return nil
+}
+
+func runTokensRenew(args []string) error {
+	fs := flag.NewFlagSet("tokens renew", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	projectName := fs.String("project", "", "project name")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("parse flags: %w", err)
+	}
+	if strings.TrimSpace(*projectName) == "" {
+		return fmt.Errorf("--project is required")
+	}
+
+	cfg, projectID, tenantToken, apiEndpoint, err := loadProjectConfig(*projectName)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		apiEndpoint+"/api/projects/"+projectID+"/tokens/renew", nil)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+tenantToken)
+
+	var resp renewTokensResponse
+	if _, err := doJSON(req, &resp); err != nil {
+		return fmt.Errorf("renew tokens: %w", err)
+	}
+
+	// Update config with new tokens
+	existing := cfg.Projects[strings.TrimSpace(*projectName)]
+	existing.ProjectToken = resp.ProjectToken.Token
+	existing.MCPReadKey = resp.MCPReadKey.Token
+	cfg.Projects[strings.TrimSpace(*projectName)] = existing
+	if err := brainconfig.Save(cfg); err != nil {
+		return fmt.Errorf("save config: %w", err)
+	}
+
+	fmt.Println("⚠️  Previous tokens have been revoked.")
+	fmt.Println("⚠️  Store these new tokens securely — shown once.")
+	fmt.Println()
+	fmt.Println("project_token:", resp.ProjectToken.Token)
+	fmt.Println("mcp_read_key: ", resp.MCPReadKey.Token)
+	fmt.Println()
+	fmt.Println("✅ Config updated at ~/.brain/config.yaml")
+	return nil
+}
+
+// loadProjectConfig is a helper shared by tokens subcommands.
+func loadProjectConfig(projectName string) (cfg brainconfig.Config, projectID, tenantToken, apiEndpoint string, err error) {
+	c, err := brainconfig.Load()
+	if err != nil {
+		return brainconfig.Config{}, "", "", "", err
+	}
+	if strings.TrimSpace(c.TenantToken) == "" {
+		return brainconfig.Config{}, "", "", "", fmt.Errorf("not logged in — run `brain login` first")
+	}
+	if strings.TrimSpace(c.APIEndpoint) == "" {
+		return brainconfig.Config{}, "", "", "", fmt.Errorf("api endpoint not set — run `brain login` first")
+	}
+	proj, ok := c.Projects[strings.TrimSpace(projectName)]
+	if !ok {
+		return brainconfig.Config{}, "", "", "", fmt.Errorf("project %q not found — run `brain register` first", projectName)
+	}
+	return c, proj.ProjectID, c.TenantToken, c.APIEndpoint, nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // ── setup ────────────────────────────────────────────────────────────────────

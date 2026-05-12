@@ -359,6 +359,85 @@ func (s *Store) CreateProjectTokens(ctx context.Context, tenantID, projectID uui
 	return projectRecord, mcpRecord, nil
 }
 
+// ListProjectTokens returns active (non-revoked, non-expired) tokens for a project.
+// Secrets are never returned.
+func (s *Store) ListProjectTokens(ctx context.Context, tenantID, projectID uuid.UUID) ([]APIKeyRecord, error) {
+	if _, err := s.GetProject(ctx, tenantID, projectID); err != nil {
+		return nil, err
+	}
+
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, tenant_id, project_id, key_prefix, secret_hash, scope, expires_at, revoked_at, created_at
+		FROM api_keys
+		WHERE tenant_id = $1
+		  AND project_id = $2
+		  AND revoked_at IS NULL
+		  AND expires_at > now()
+		  AND scope IN ('project', 'mcp_read')
+		ORDER BY created_at DESC
+	`, tenantID, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("query project tokens: %w", err)
+	}
+	defer rows.Close()
+
+	var records []APIKeyRecord
+	for rows.Next() {
+		r, err := scanAPIKey(rows)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate project tokens: %w", err)
+	}
+	return records, nil
+}
+
+// RenewProjectTokens revokes all active project+mcp_read tokens for a project
+// and inserts a fresh pair atomically.
+func (s *Store) RenewProjectTokens(ctx context.Context, tenantID, projectID uuid.UUID, projectKey, mcpKey auth.IssuedToken) (APIKeyRecord, APIKeyRecord, error) {
+	var projectRecord, mcpRecord APIKeyRecord
+
+	err := s.withTx(ctx, func(tx pgx.Tx) error {
+		// Verify the project belongs to this tenant
+		if _, err := s.GetProject(ContextWithTx(ctx, tx), tenantID, projectID); err != nil {
+			return err
+		}
+
+		// Revoke all active project + mcp_read tokens for this project
+		if _, err := tx.Exec(ctx, `
+			UPDATE api_keys
+			SET revoked_at = now()
+			WHERE tenant_id = $1
+			  AND project_id = $2
+			  AND scope IN ('project', 'mcp_read')
+			  AND revoked_at IS NULL
+		`, tenantID, projectID); err != nil {
+			return fmt.Errorf("revoke existing project tokens: %w", err)
+		}
+
+		// Issue fresh pair
+		projectRecord = newAPIKeyRecord(tenantID, &projectID, projectKey)
+		if err := insertAPIKey(ctx, tx, projectRecord); err != nil {
+			return err
+		}
+
+		mcpRecord = newAPIKeyRecord(tenantID, &projectID, mcpKey)
+		if err := insertAPIKey(ctx, tx, mcpRecord); err != nil {
+			return err
+		}
+
+		return nil
+	})
+	if err != nil {
+		return APIKeyRecord{}, APIKeyRecord{}, err
+	}
+
+	return projectRecord, mcpRecord, nil
+}
+
 func (s *Store) withTx(ctx context.Context, fn func(tx pgx.Tx) error) error {
 	if tx, ok := TxFromContext(ctx); ok {
 		return fn(tx)
