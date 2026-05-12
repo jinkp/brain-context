@@ -18,10 +18,14 @@ type Embedder interface {
 }
 
 var supportedModels = map[string]int{
-	"gemini/text-embedding-004":     768,
-	"openai/text-embedding-3-large": 1024,
-	"openai/text-embedding-3-small": 1024,
-	"ollama/bge-m3":                 1024,
+	"gemini/text-embedding-004":        768,
+	"gemini/gemini-embedding-001":      768,
+	"gemini/gemini-embedding-2":        768,
+	"openai/text-embedding-3-large":    1024,
+	"openai/text-embedding-3-small":    1024,
+	"ollama/bge-m3":                    1024,
+	"ollama/nomic-embed-text":          768,
+	"ollama/nomic-embed-text:latest":   768,
 }
 
 func New(model string, apiKey string) (Embedder, error) {

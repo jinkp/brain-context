@@ -11,7 +11,9 @@ import (
 	"time"
 )
 
-const geminiEndpoint = "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:batchEmbedContents"
+
+
+const geminiBaseURL = "https://generativelanguage.googleapis.com/v1beta/models"
 
 type geminiEmbedder struct {
 	model      string
@@ -61,10 +63,53 @@ func (e *geminiEmbedder) Dimensions() int {
 	return e.dimensions
 }
 
+const geminiBatchSize = 100 // Gemini API limit: max 100 requests per batch
+
 func (e *geminiEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
 	if strings.TrimSpace(e.apiKey) == "" {
 		return nil, fmt.Errorf("gemini api key is required")
 	}
+
+	// Filter out empty texts
+	filtered := make([]string, 0, len(texts))
+	for _, t := range texts {
+		if strings.TrimSpace(t) != "" {
+			filtered = append(filtered, t)
+		}
+	}
+	texts = filtered
+
+	result := make([][]float32, 0, len(texts))
+
+	// Process in batches of 100 (Gemini API limit)
+	for i := 0; i < len(texts); i += geminiBatchSize {
+		end := i + geminiBatchSize
+		if end > len(texts) {
+			end = len(texts)
+		}
+		batch := texts[i:end]
+
+		// Wait 65s between batches to respect free tier rate limit (100 req/min)
+		if i > 0 {
+			fmt.Printf("  [gemini] rate limit pause (batch %d/%d)...\n", i/geminiBatchSize+1, (len(texts)+geminiBatchSize-1)/geminiBatchSize)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(65 * time.Second):
+			}
+		}
+
+		embeddings, err := e.embedBatch(ctx, batch)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, embeddings...)
+	}
+
+	return result, nil
+}
+
+func (e *geminiEmbedder) embedBatch(ctx context.Context, texts []string) ([][]float32, error) {
 	requests := make([]geminiEmbedRequest, 0, len(texts))
 	for _, text := range texts {
 		requests = append(requests, geminiEmbedRequest{
@@ -78,7 +123,8 @@ func (e *geminiEmbedder) Embed(ctx context.Context, texts []string) ([][]float32
 	if err != nil {
 		return nil, fmt.Errorf("marshal gemini request: %w", err)
 	}
-	endpoint := geminiEndpoint + "?key=" + url.QueryEscape(e.apiKey)
+	modelName := strings.TrimPrefix(e.model, ProviderGemini+"/")
+	endpoint := geminiBaseURL + "/" + modelName + ":batchEmbedContents?key=" + url.QueryEscape(e.apiKey)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
 		return nil, fmt.Errorf("create gemini request: %w", err)

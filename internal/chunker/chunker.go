@@ -34,7 +34,10 @@ func Build(file scanner.ScannedFile, symbols []parser.ParsedSymbol, data []byte)
 			return nil, fmt.Errorf("invalid symbol range %s:%d-%d", file.Path, symbol.StartLine, symbol.EndLine)
 		}
 
-		content := strings.Join(lines[symbol.StartLine-1:symbol.EndLine], "\n")
+		content := strings.TrimSpace(strings.Join(lines[symbol.StartLine-1:symbol.EndLine], "\n"))
+		if content == "" {
+			continue // skip empty chunks — Gemini API rejects empty content
+		}
 		chunks = append(chunks, Chunk{
 			ChunkHash:  hashNormalized(content),
 			SymbolName: symbol.Name,
