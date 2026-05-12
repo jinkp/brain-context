@@ -50,7 +50,9 @@ type createProjectRequest struct {
 }
 
 type createProjectResponse struct {
-	ID string `json:"id"`
+	ID      string                  `json:"id"`
+	Project *createProjectResponse  `json:"project,omitempty"` // wrapped when embed_api_key sent
+	Warning string                  `json:"warning,omitempty"`
 }
 
 type tokenEnvelope struct {
@@ -253,8 +255,17 @@ func createProject(ctx context.Context, apiEndpoint, token string, body createPr
 	if _, err := doJSON(req, &response); err != nil {
 		return createProjectResponse{}, fmt.Errorf("register project: %w", err)
 	}
+	// Handle both response formats:
+	// { "id": "..." }  — no embed_api_key
+	// { "project": { "id": "..." }, "warning": "..." }  — with embed_api_key
+	if strings.TrimSpace(response.ID) == "" && response.Project != nil {
+		response.ID = response.Project.ID
+	}
 	if strings.TrimSpace(response.ID) == "" {
 		return createProjectResponse{}, fmt.Errorf("register project: api returned empty project id")
+	}
+	if response.Warning != "" {
+		fmt.Fprintf(os.Stderr, "⚠️  %s\n", response.Warning)
 	}
 	return response, nil
 }
