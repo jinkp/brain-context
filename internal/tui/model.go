@@ -106,13 +106,15 @@ type Model struct {
 	clientResults map[string]error
 
 	// shared
-	brainExe string
-	apiURL   string
-	token    string
+	brainExe    string
+	apiURL      string
+	token       string
+	clientsOnly bool // skip connect + embedder steps
 }
 
 // New creates a fresh setup wizard model.
-func New(brainExe string, currentVersion string) Model {
+// If clientsOnly is true, the TUI skips straight to the clients step.
+func New(brainExe string, currentVersion string, clientsOnly ...bool) Model {
 	api := textinput.New()
 	api.Placeholder = "https://brain.mycompany.com"
 	api.Width = 52
@@ -140,8 +142,15 @@ func New(brainExe string, currentVersion string) Model {
 		checked[i] = true
 	}
 
+	startScreen := ScreenConnect
+	if len(clientsOnly) > 0 && clientsOnly[0] {
+		startScreen = ScreenClients
+	}
+
+	isClientsOnly := len(clientsOnly) > 0 && clientsOnly[0]
+
 	return Model{
-		screen:         ScreenConnect,
+		screen:         startScreen,
 		apiInput:       api,
 		tokenInput:     tok,
 		keyInput:       key,
@@ -149,6 +158,7 @@ func New(brainExe string, currentVersion string) Model {
 		clientChecked:  checked,
 		brainExe:       brainExe,
 		currentVersion: currentVersion,
+		clientsOnly:    isClientsOnly,
 	}
 }
 

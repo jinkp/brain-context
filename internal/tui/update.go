@@ -166,6 +166,9 @@ func (m Model) updateClients(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+c":
 		return m, tea.Quit
 	case "esc":
+		if m.clientsOnly {
+			return m, tea.Quit
+		}
 		m.screen = ScreenEmbedder
 		return m, nil
 

@@ -356,12 +356,12 @@ func normalizeModel(provider, model string) string {
 	return provider + "/" + model
 }
 
-func runSetupTUI() error {
+func runSetupTUI(clientsOnly bool) error {
 	exe, err := os.Executable()
 	if err != nil {
 		exe = "brain"
 	}
-	m := braintui.New(exe, version)
+	m := braintui.New(exe, version, clientsOnly)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err = p.Run()
 	return err
@@ -378,7 +378,9 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  brain tokens list    --project <name>")
 	fmt.Fprintln(os.Stderr, "  brain tokens renew   --project <name>")
 	fmt.Fprintln(os.Stderr, "  brain mcp            [--project <name>]")
-	fmt.Fprintln(os.Stderr, "  brain setup          [client]  clients: opencode, claude, cursor, gemini, windsurf, all")
+	fmt.Fprintln(os.Stderr, "  brain setup                     interactive TUI wizard (full onboarding)")
+	fmt.Fprintln(os.Stderr, "  brain setup clients             TUI — client selection only (for developers)")
+	fmt.Fprintln(os.Stderr, "  brain setup <client>            direct: opencode, claude, cursor, gemini, windsurf, all")
 	fmt.Fprintln(os.Stderr, "  brain version")
 }
 
@@ -687,9 +689,13 @@ type configMergeFn func(path string) error
 var supportedClients = []string{"opencode", "claude", "cursor", "gemini", "windsurf", "all"}
 
 func runSetup(args []string) error {
-	// No args → launch interactive TUI wizard
+	// No args → launch full TUI wizard
 	if len(args) == 0 {
-		return runSetupTUI()
+		return runSetupTUI(false)
+	}
+	// --clients → TUI skips to client selection only
+	if args[0] == "--clients" || args[0] == "clients" {
+		return runSetupTUI(true)
 	}
 	client := strings.ToLower(strings.TrimSpace(args[0]))
 
