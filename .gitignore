@@ -23,3 +23,7 @@ pgdata/
 
 # SDD internal artifacts
 .atl/
+
+# Build artifacts
+dist/
+bin/
