@@ -31,6 +31,7 @@ func NewServer(st *store.Store) *echo.Echo {
 	tenantOnly.POST("/projects", h.CreateProject)
 	tenantOnly.GET("/projects/:id", h.GetProject)
 	tenantOnly.PATCH("/projects/:id/embed-key", h.UpdateEmbedKey)
+	tenantOnly.GET("/admin/metrics", h.GetMetrics)
 	tenantOnly.POST("/projects/:id/tokens", h.CreateProjectTokens)
 	tenantOnly.GET("/projects/:id/tokens", h.ListProjectTokens)
 	tenantOnly.POST("/projects/:id/tokens/renew", h.RenewProjectTokens)

@@ -11,6 +11,7 @@ import (
 
 	"github.com/Gentleman-Programming/brain-context/internal/auth"
 	"github.com/Gentleman-Programming/brain-context/internal/retriever"
+	"github.com/Gentleman-Programming/brain-context/internal/store"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/labstack/echo/v4"
@@ -127,6 +128,38 @@ func (h *Handler) SearchContext(c echo.Context) error {
 			Relationships: relationships,
 		})
 	}
+
+	// ── Metrics instrumentation (synchronous, after response is built) ────────
+	fmt.Printf("[metrics] recording query for project %s chunks=%d\n", projectID, len(ranked))
+	actorPrefix := ""
+	if key, ok := authKeyFromContext(c); ok {
+		actorPrefix = key.KeyPrefix
+	}
+	var topScore, scoreSum float64
+	var tokensReturned int
+	for i, chunk := range ranked {
+		if i == 0 {
+			topScore = chunk.FinalScore
+		}
+		scoreSum += chunk.FinalScore
+		tokensReturned += chunk.TokenCount
+	}
+	var avgScore float64
+	if len(ranked) > 0 {
+		avgScore = scoreSum / float64(len(ranked))
+	}
+	totalChunks, avgTokens, _ := h.store.GetProjectChunkCount(c.Request().Context(), tenantID, projectID)
+	h.store.InsertQueryLog(c.Request().Context(), store.QueryLog{
+		TenantID:        tenantID,
+		ProjectID:       projectID,
+		ActorPrefix:     actorPrefix,
+		ChunksReturned:  len(ranked),
+		TopScore:        float32(topScore),
+		AvgScore:        float32(avgScore),
+		TotalCandidates: len(candidates),
+		TokensReturned:  tokensReturned,
+		TokensInRepo:    totalChunks * avgTokens,
+	})
 
 	return c.JSON(http.StatusOK, searchResponse{ProjectID: projectID, Chunks: chunks, TotalCandidates: len(candidates)})
 }
