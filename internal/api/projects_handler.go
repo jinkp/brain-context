@@ -80,12 +80,7 @@ func (h *Handler) CreateProject(c echo.Context) error {
 		if err != nil {
 			return writeError(c, http.StatusInternalServerError, "ENCRYPT_FAILED", "failed to encrypt embed api key")
 		}
-		// Use tenant-scoped context so RLS allows the update
-		tenantCtx := c.Request().Context()
-		if err := store.SetTenantContext(tenantCtx, h.store.Executor(tenantCtx), tenantID); err != nil {
-			return writeError(c, http.StatusInternalServerError, "INTERNAL", "failed to set tenant context")
-		}
-		if err := h.store.SaveEmbedAPIKey(tenantCtx, tenantID, project.ID, enc); err != nil {
+		if err := h.store.SaveEmbedAPIKey(c.Request().Context(), tenantID, project.ID, enc); err != nil {
 			return handleStoreError(c, err)
 		}
 	}
@@ -123,11 +118,6 @@ func (h *Handler) UpdateEmbedKey(c echo.Context) error {
 		return writeError(c, http.StatusInternalServerError, "ENCRYPT_FAILED", "failed to encrypt embed api key")
 	}
 
-	// Set RLS context then save
-	exec := h.store.Executor(c.Request().Context())
-	if err := store.SetTenantContext(c.Request().Context(), exec, tenantID); err != nil {
-		return writeError(c, http.StatusInternalServerError, "INTERNAL", "failed to set tenant context")
-	}
 	if err := h.store.SaveEmbedAPIKey(c.Request().Context(), tenantID, projectID, enc); err != nil {
 		return handleStoreError(c, err)
 	}

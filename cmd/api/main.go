@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Gentleman-Programming/brain-context/internal/api"
+	braincrypto "github.com/Gentleman-Programming/brain-context/internal/crypto"
 	"github.com/Gentleman-Programming/brain-context/internal/store"
 )
 
@@ -34,6 +35,13 @@ func main() {
 	address := os.Getenv("API_ADDR")
 	if address == "" {
 		address = ":8080"
+	}
+
+	// Log encryption status
+	if braincrypto.IsConfigured() {
+		log.Printf("encryption: BRAIN_ENCRYPTION_KEY configured ✓")
+	} else {
+		log.Printf("encryption: BRAIN_ENCRYPTION_KEY NOT set — embed key sharing disabled")
 	}
 
 	log.Printf("brain-context API listening on %s", address)

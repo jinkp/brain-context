@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 )
 
 const envKey = "BRAIN_ENCRYPTION_KEY"
@@ -90,7 +91,7 @@ func IsConfigured() bool {
 }
 
 func serverKey() ([]byte, error) {
-	raw := os.Getenv(envKey)
+	raw := strings.TrimSpace(os.Getenv(envKey))
 	if raw == "" {
 		return nil, fmt.Errorf(
 			"BRAIN_ENCRYPTION_KEY is not set — generate one with: openssl rand -hex 32",
