@@ -75,6 +75,8 @@ func main() {
 		err = runUpdate(os.Args[2:])
 	case "mcp":
 		err = runMCP(os.Args[2:])
+	case "setup":
+		err = runSetup(os.Args[2:])
 	case "version":
 		fmt.Println(version)
 		return
@@ -326,12 +328,300 @@ func normalizeModel(provider, model string) string {
 
 func printUsage() {
 	fmt.Fprintln(os.Stderr, "Usage:")
-	fmt.Fprintln(os.Stderr, "  brain login --token <tenant-api-key> [--api http://localhost:8080]")
+	fmt.Fprintln(os.Stderr, "  brain login    --token <tenant-api-key> [--api http://localhost:8080]")
 	fmt.Fprintln(os.Stderr, "  brain register --project <name> --repo <path> --embedder <gemini|openai|ollama> --api-key <key> --model <model>")
-	fmt.Fprintln(os.Stderr, "  brain index --project <name> [--upload]")
-	fmt.Fprintln(os.Stderr, "  brain update --project <name> [--upload]")
-	fmt.Fprintln(os.Stderr, "  brain mcp [--project <name>]")
+	fmt.Fprintln(os.Stderr, "  brain index    --project <name>")
+	fmt.Fprintln(os.Stderr, "  brain update   --project <name>")
+	fmt.Fprintln(os.Stderr, "  brain mcp      [--project <name>]")
+	fmt.Fprintln(os.Stderr, "  brain setup    <client>   clients: opencode, claude, cursor, gemini, windsurf, all")
 	fmt.Fprintln(os.Stderr, "  brain version")
+}
+
+// ── setup ────────────────────────────────────────────────────────────────────
+
+type mcpClientConfig struct {
+	name        string
+	description string
+	configPaths []configPathFn       // ordered candidate locations
+	merge       configMergeFn        // how to inject our entry
+}
+
+type configPathFn func() string
+type configMergeFn func(path string) error
+
+var supportedClients = []string{"opencode", "claude", "cursor", "gemini", "windsurf", "all"}
+
+func runSetup(args []string) error {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: brain setup <client>")
+		fmt.Fprintln(os.Stderr, "Clients:", strings.Join(supportedClients, ", "))
+		return fmt.Errorf("client name is required")
+	}
+	client := strings.ToLower(strings.TrimSpace(args[0]))
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("get home dir: %w", err)
+	}
+
+	brainExe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("get executable path: %w", err)
+	}
+	brainExe, _ = filepath.Abs(brainExe)
+
+	var targets []string
+	if client == "all" {
+		targets = []string{"opencode", "claude", "cursor", "gemini", "windsurf"}
+	} else {
+		targets = []string{client}
+	}
+
+	anyOK := false
+	for _, t := range targets {
+		if err := setupClient(t, home, brainExe); err != nil {
+			fmt.Fprintf(os.Stderr, "  ⚠️  %s: %v\n", t, err)
+		} else {
+			anyOK = true
+		}
+	}
+
+	if anyOK {
+		fmt.Println()
+		fmt.Println("✅ Done. Restart your IDE / agent to load brain-context MCP tools.")
+		fmt.Println()
+		fmt.Println("Available tools:")
+		fmt.Println("  • search_project_context")
+		fmt.Println("  • get_file_summary")
+		fmt.Println("  • get_related_files")
+		fmt.Println("  • explain_flow")
+		fmt.Println("  • find_impact")
+	}
+	return nil
+}
+
+func setupClient(client, home, brainExe string) error {
+	switch client {
+	case "opencode":
+		return setupOpenCode(home, brainExe)
+	case "claude":
+		return setupClaude(home, brainExe)
+	case "cursor":
+		return setupCursor(home, brainExe)
+	case "gemini":
+		return setupGemini(home, brainExe)
+	case "windsurf":
+		return setupWindsurf(home, brainExe)
+	default:
+		return fmt.Errorf("unknown client %q — supported: %s", client, strings.Join(supportedClients, ", "))
+	}
+}
+
+// mcpEntry returns the JSON snippet to inject for each client format.
+func mcpCommandEntry(brainExe string) []string {
+	return []string{brainExe, "mcp"}
+}
+
+// ── OpenCode ─────────────────────────────────────────────────────────────────
+
+func setupOpenCode(home, brainExe string) error {
+	candidates := []string{
+		filepath.Join(home, ".config", "opencode", "opencode.json"),
+		filepath.Join(home, "Library", "Application Support", "opencode", "opencode.json"), // macOS
+	}
+	path := firstExisting(candidates)
+	if path == "" {
+		path = candidates[0]
+	}
+
+	cfg, err := readJSONMap(path)
+	if err != nil {
+		cfg = map[string]any{}
+	}
+
+	mcp := getOrCreateMap(cfg, "mcp")
+	mcp["brain-context"] = map[string]any{
+		"type":    "local",
+		"command": mcpCommandEntry(brainExe),
+	}
+	cfg["mcp"] = mcp
+
+	if err := writeJSONMap(path, cfg); err != nil {
+		return err
+	}
+	fmt.Printf("  ✅ opencode  → %s\n", path)
+	return nil
+}
+
+// ── Claude Code ───────────────────────────────────────────────────────────────
+
+func setupClaude(home, brainExe string) error {
+	// Claude Code stores MCP config in settings.json
+	candidates := []string{
+		filepath.Join(home, ".claude", "settings.json"),
+		filepath.Join(home, "Library", "Application Support", "Claude", "settings.json"),
+		filepath.Join(os.Getenv("APPDATA"), "Claude", "settings.json"),
+	}
+	path := firstExisting(candidates)
+	if path == "" {
+		path = candidates[0]
+	}
+
+	cfg, err := readJSONMap(path)
+	if err != nil {
+		cfg = map[string]any{}
+	}
+
+	mcpServers := getOrCreateMap(cfg, "mcpServers")
+	mcpServers["brain-context"] = map[string]any{
+		"command": brainExe,
+		"args":    []string{"mcp"},
+	}
+	cfg["mcpServers"] = mcpServers
+
+	if err := writeJSONMap(path, cfg); err != nil {
+		return err
+	}
+	fmt.Printf("  ✅ claude    → %s\n", path)
+	return nil
+}
+
+// ── Cursor ────────────────────────────────────────────────────────────────────
+
+func setupCursor(home, brainExe string) error {
+	candidates := []string{
+		filepath.Join(home, ".cursor", "mcp.json"),
+		filepath.Join(home, "Library", "Application Support", "Cursor", "mcp.json"),
+		filepath.Join(os.Getenv("APPDATA"), "Cursor", "mcp.json"),
+	}
+	path := firstExisting(candidates)
+	if path == "" {
+		path = candidates[0]
+	}
+
+	cfg, err := readJSONMap(path)
+	if err != nil {
+		cfg = map[string]any{}
+	}
+
+	mcpServers := getOrCreateMap(cfg, "mcpServers")
+	mcpServers["brain-context"] = map[string]any{
+		"command": brainExe,
+		"args":    []string{"mcp"},
+	}
+	cfg["mcpServers"] = mcpServers
+
+	if err := writeJSONMap(path, cfg); err != nil {
+		return err
+	}
+	fmt.Printf("  ✅ cursor    → %s\n", path)
+	return nil
+}
+
+// ── Gemini CLI ────────────────────────────────────────────────────────────────
+
+func setupGemini(home, brainExe string) error {
+	candidates := []string{
+		filepath.Join(home, ".gemini", "settings.json"),
+		filepath.Join(home, ".config", "gemini", "settings.json"),
+	}
+	path := firstExisting(candidates)
+	if path == "" {
+		path = candidates[0]
+	}
+
+	cfg, err := readJSONMap(path)
+	if err != nil {
+		cfg = map[string]any{}
+	}
+
+	mcpServers := getOrCreateMap(cfg, "mcpServers")
+	mcpServers["brain-context"] = map[string]any{
+		"command": brainExe,
+		"args":    []string{"mcp"},
+	}
+	cfg["mcpServers"] = mcpServers
+
+	if err := writeJSONMap(path, cfg); err != nil {
+		return err
+	}
+	fmt.Printf("  ✅ gemini    → %s\n", path)
+	return nil
+}
+
+// ── Windsurf ──────────────────────────────────────────────────────────────────
+
+func setupWindsurf(home, brainExe string) error {
+	candidates := []string{
+		filepath.Join(home, ".codeium", "windsurf", "mcp_config.json"),
+		filepath.Join(home, "Library", "Application Support", "Windsurf", "mcp_config.json"),
+		filepath.Join(os.Getenv("APPDATA"), "Windsurf", "mcp_config.json"),
+	}
+	path := firstExisting(candidates)
+	if path == "" {
+		path = candidates[0]
+	}
+
+	cfg, err := readJSONMap(path)
+	if err != nil {
+		cfg = map[string]any{}
+	}
+
+	mcpServers := getOrCreateMap(cfg, "mcpServers")
+	mcpServers["brain-context"] = map[string]any{
+		"command": brainExe,
+		"args":    []string{"mcp"},
+	}
+	cfg["mcpServers"] = mcpServers
+
+	if err := writeJSONMap(path, cfg); err != nil {
+		return err
+	}
+	fmt.Printf("  ✅ windsurf  → %s\n", path)
+	return nil
+}
+
+// ── JSON helpers ──────────────────────────────────────────────────────────────
+
+func readJSONMap(path string) (map[string]any, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+func writeJSONMap(path string, m map[string]any) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	data, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
+func getOrCreateMap(parent map[string]any, key string) map[string]any {
+	if v, ok := parent[key]; ok {
+		if m, ok := v.(map[string]any); ok {
+			return m
+		}
+	}
+	return map[string]any{}
+}
+
+func firstExisting(paths []string) string {
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return ""
 }
 
 func runMCP(args []string) error {
