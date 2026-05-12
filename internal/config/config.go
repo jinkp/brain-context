@@ -28,7 +28,8 @@ type ProjectConfig struct {
 	MCPReadKey      string `yaml:"mcp_read_key"`
 	RepoPath        string `yaml:"repo_path"`
 	EmbedModel      string `yaml:"embed_model"`
-	EmbedAPIKey     string `yaml:"embed_api_key"`
+	EmbedAPIKey     string `yaml:"embed_api_key"`      // plaintext — only set by admin locally
+	EmbedAPIKeyEnc  string `yaml:"embed_api_key_enc"`  // AES-256-GCM encrypted — set via brain join
 	EmbedDimensions int    `yaml:"embed_dimensions"`
 }
 

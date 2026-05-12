@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/Gentleman-Programming/brain-context/internal/crypto"
 	"github.com/Gentleman-Programming/brain-context/internal/store"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -21,6 +22,7 @@ type createProjectRequest struct {
 	DefaultBranch   string  `json:"default_branch"`
 	EmbedModel      string  `json:"embed_model"`
 	EmbedDimensions int     `json:"embed_dimensions"`
+	EmbedAPIKey     string  `json:"embed_api_key"` // optional — encrypted before storing
 }
 
 func (h *Handler) CreateProject(c echo.Context) error {
@@ -66,7 +68,73 @@ func (h *Handler) CreateProject(c echo.Context) error {
 		return handleStoreError(c, err)
 	}
 
+	// If an embed API key was provided, encrypt and store it
+	if strings.TrimSpace(req.EmbedAPIKey) != "" {
+		if !crypto.IsConfigured() {
+			return c.JSON(http.StatusCreated, map[string]any{
+				"project": project,
+				"warning": "BRAIN_ENCRYPTION_KEY not set on server — embed_api_key was NOT stored. Set the env var and re-run: brain register --project " + req.Name + " --embed-api-key <key>",
+			})
+		}
+		enc, err := crypto.Encrypt(strings.TrimSpace(req.EmbedAPIKey))
+		if err != nil {
+			return writeError(c, http.StatusInternalServerError, "ENCRYPT_FAILED", "failed to encrypt embed api key")
+		}
+		// Use tenant-scoped context so RLS allows the update
+		tenantCtx := c.Request().Context()
+		if err := store.SetTenantContext(tenantCtx, h.store.Executor(tenantCtx), tenantID); err != nil {
+			return writeError(c, http.StatusInternalServerError, "INTERNAL", "failed to set tenant context")
+		}
+		if err := h.store.SaveEmbedAPIKey(tenantCtx, tenantID, project.ID, enc); err != nil {
+			return handleStoreError(c, err)
+		}
+	}
+
 	return c.JSON(http.StatusCreated, project)
+}
+
+// UpdateEmbedKey sets or replaces the encrypted embed API key for a project.
+// PATCH /api/projects/:id/embed-key
+func (h *Handler) UpdateEmbedKey(c echo.Context) error {
+	tenantID, ok := tenantIDFromContext(c)
+	if !ok {
+		return writeError(c, http.StatusUnauthorized, "UNAUTHORIZED", "missing tenant context")
+	}
+
+	projectID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return writeError(c, http.StatusBadRequest, "VALIDATION_ERROR", "invalid project id")
+	}
+
+	var req struct {
+		EmbedAPIKey string `json:"embed_api_key"`
+	}
+	if err := c.Bind(&req); err != nil || strings.TrimSpace(req.EmbedAPIKey) == "" {
+		return writeError(c, http.StatusBadRequest, "VALIDATION_ERROR", "embed_api_key is required")
+	}
+
+	if !crypto.IsConfigured() {
+		return writeError(c, http.StatusServiceUnavailable, "ENCRYPTION_NOT_CONFIGURED",
+			"BRAIN_ENCRYPTION_KEY not set on server")
+	}
+
+	enc, err := crypto.Encrypt(strings.TrimSpace(req.EmbedAPIKey))
+	if err != nil {
+		return writeError(c, http.StatusInternalServerError, "ENCRYPT_FAILED", "failed to encrypt embed api key")
+	}
+
+	// Set RLS context then save
+	exec := h.store.Executor(c.Request().Context())
+	if err := store.SetTenantContext(c.Request().Context(), exec, tenantID); err != nil {
+		return writeError(c, http.StatusInternalServerError, "INTERNAL", "failed to set tenant context")
+	}
+	if err := h.store.SaveEmbedAPIKey(c.Request().Context(), tenantID, projectID, enc); err != nil {
+		return handleStoreError(c, err)
+	}
+
+	return c.JSON(http.StatusOK, map[string]any{
+		"message": "embed API key stored and encrypted successfully",
+	})
 }
 
 func (h *Handler) GetProject(c echo.Context) error {

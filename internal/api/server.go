@@ -30,9 +30,14 @@ func NewServer(st *store.Store) *echo.Echo {
 	tenantOnly.DELETE("/auth/keys/:id", h.RevokeKey)
 	tenantOnly.POST("/projects", h.CreateProject)
 	tenantOnly.GET("/projects/:id", h.GetProject)
+	tenantOnly.PATCH("/projects/:id/embed-key", h.UpdateEmbedKey)
 	tenantOnly.POST("/projects/:id/tokens", h.CreateProjectTokens)
 	tenantOnly.GET("/projects/:id/tokens", h.ListProjectTokens)
 	tenantOnly.POST("/projects/:id/tokens/renew", h.RenewProjectTokens)
+	tenantOnly.POST("/projects/:id/invite", h.CreateInvite)
+
+	// Public — no auth needed, the invite code IS the auth
+	apiGroup.POST("/invite/redeem", h.RedeemInvite)
 
 	projectOnly := authed.Group("", RequireScopes(auth.ScopeProject))
 	projectOnly.POST("/projects/:id/chunks", h.UploadChunks)

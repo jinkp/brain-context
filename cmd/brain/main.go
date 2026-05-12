@@ -18,6 +18,7 @@ import (
 
 	"github.com/Gentleman-Programming/brain-context/internal/chunker"
 	brainconfig "github.com/Gentleman-Programming/brain-context/internal/config"
+	braincrypto "github.com/Gentleman-Programming/brain-context/internal/crypto"
 	"github.com/Gentleman-Programming/brain-context/internal/embedder"
 	"github.com/Gentleman-Programming/brain-context/internal/indexer"
 	brainmcp "github.com/Gentleman-Programming/brain-context/internal/mcp"
@@ -45,6 +46,7 @@ type createProjectRequest struct {
 	Name            string `json:"name"`
 	EmbedModel      string `json:"embed_model"`
 	EmbedDimensions int    `json:"embed_dimensions"`
+	EmbedAPIKey     string `json:"embed_api_key,omitempty"`
 }
 
 type createProjectResponse struct {
@@ -82,6 +84,10 @@ func main() {
 		err = runSetup(os.Args[2:])
 	case "tokens":
 		err = runTokens(os.Args[2:])
+	case "invite":
+		err = runInvite(os.Args[2:])
+	case "join":
+		err = runJoin(os.Args[2:])
 	case "version":
 		fmt.Println(version)
 		return
@@ -138,7 +144,7 @@ func runRegister(args []string) error {
 	projectName := fs.String("project", "", "project name")
 	repoPath := fs.String("repo", "", "repository path")
 	provider := fs.String("embedder", "", "embedder provider: gemini|openai|ollama")
-	apiKey := fs.String("api-key", "", "embedder api key")
+	apiKey := fs.String("embed-api-key", "", "embedder api key (encrypted on server for team sharing)")
 	model := fs.String("model", "", "embedder model")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("parse register flags: %w", err)
@@ -183,6 +189,7 @@ func runRegister(args []string) error {
 		Name:            strings.TrimSpace(*projectName),
 		EmbedModel:      fullModel,
 		EmbedDimensions: emb.Dimensions(),
+		EmbedAPIKey:     strings.TrimSpace(*apiKey), // uploaded encrypted by the API
 	})
 	if err != nil {
 		return err
@@ -345,14 +352,142 @@ func runSetupTUI() error {
 func printUsage() {
 	fmt.Fprintln(os.Stderr, "Usage:")
 	fmt.Fprintln(os.Stderr, "  brain login          --token <tenant-api-key> [--api http://localhost:8080]")
-	fmt.Fprintln(os.Stderr, "  brain register       --project <name> --repo <path> --embedder <gemini|openai|ollama> --api-key <key> --model <model>")
+	fmt.Fprintln(os.Stderr, "  brain register       --project <name> --repo <path> --embedder <gemini|openai|ollama> --embed-api-key <key> --model <model>")
 	fmt.Fprintln(os.Stderr, "  brain index          --project <name>")
 	fmt.Fprintln(os.Stderr, "  brain update         --project <name>")
+	fmt.Fprintln(os.Stderr, "  brain invite         --project <name>  [--ttl 24h]")
+	fmt.Fprintln(os.Stderr, "  brain join           --code <brn_invite_xxx>  [--api http://localhost:8080]")
 	fmt.Fprintln(os.Stderr, "  brain tokens list    --project <name>")
 	fmt.Fprintln(os.Stderr, "  brain tokens renew   --project <name>")
 	fmt.Fprintln(os.Stderr, "  brain mcp            [--project <name>]")
 	fmt.Fprintln(os.Stderr, "  brain setup          [client]  clients: opencode, claude, cursor, gemini, windsurf, all")
 	fmt.Fprintln(os.Stderr, "  brain version")
+}
+
+// ── invite ────────────────────────────────────────────────────────────────────
+
+type createInviteResponse struct {
+	Code      string    `json:"code"`
+	ExpiresAt time.Time `json:"expires_at"`
+	Message   string    `json:"message"`
+}
+
+func runInvite(args []string) error {
+	fs := flag.NewFlagSet("invite", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	projectName := fs.String("project", "", "project name")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("parse flags: %w", err)
+	}
+	if strings.TrimSpace(*projectName) == "" {
+		return fmt.Errorf("--project is required")
+	}
+
+	_, projectID, tenantToken, apiEndpoint, err := loadProjectConfig(*projectName)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		apiEndpoint+"/api/projects/"+projectID+"/invite", nil)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+tenantToken)
+
+	var resp createInviteResponse
+	if _, err := doJSON(req, &resp); err != nil {
+		return fmt.Errorf("create invite: %w", err)
+	}
+
+	fmt.Println()
+	fmt.Printf("  Invite code for project %q:\n\n", *projectName)
+	fmt.Printf("  %s\n\n", resp.Code)
+	fmt.Printf("  Expires: %s\n", resp.ExpiresAt.Local().Format("2006-01-02 15:04:05"))
+	fmt.Println()
+	fmt.Println("  Share with your developer. They run:")
+	fmt.Printf("  brain join --code %s --api %s\n\n", resp.Code, apiEndpoint)
+	return nil
+}
+
+// ── join ──────────────────────────────────────────────────────────────────────
+
+type redeemInviteResponse struct {
+	ProjectID       string `json:"project_id"`
+	ProjectName     string `json:"project_name"`
+	EmbedModel      string `json:"embed_model"`
+	EmbedDimensions int    `json:"embed_dimensions"`
+	EmbedAPIKeyEnc  string `json:"embed_api_key_enc"`
+	MCPReadKey      string `json:"mcp_read_key"`
+	Message         string `json:"message"`
+}
+
+func runJoin(args []string) error {
+	fs := flag.NewFlagSet("join", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	code := fs.String("code", "", "invite code (brn_invite_...)")
+	apiEndpoint := fs.String("api", "http://localhost:8080", "api base url")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("parse flags: %w", err)
+	}
+	if strings.TrimSpace(*code) == "" {
+		return fmt.Errorf("--code is required")
+	}
+
+	endpoint := normalizeEndpoint(*apiEndpoint)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	// Call redeem endpoint
+	body, _ := json.Marshal(map[string]string{"code": strings.TrimSpace(*code)})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		endpoint+"/api/invite/redeem",
+		bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	var resp redeemInviteResponse
+	if _, err := doJSON(req, &resp); err != nil {
+		return fmt.Errorf("redeem invite: %w", err)
+	}
+
+	// Save to local config
+	cfg, err := brainconfig.Load()
+	if err != nil {
+		return err
+	}
+	cfg.APIEndpoint = endpoint
+
+	// Keep existing project config if present, only update tokens + embed
+	existing := cfg.Projects[resp.ProjectName]
+	existing.ProjectID = resp.ProjectID
+	existing.MCPReadKey = resp.MCPReadKey
+	existing.EmbedModel = resp.EmbedModel
+	existing.EmbedDimensions = resp.EmbedDimensions
+	existing.EmbedAPIKeyEnc = resp.EmbedAPIKeyEnc
+	cfg.Projects[resp.ProjectName] = existing
+
+	if err := brainconfig.Save(cfg); err != nil {
+		return fmt.Errorf("save config: %w", err)
+	}
+
+	fmt.Println()
+	fmt.Printf("  ✅ Joined project %q\n\n", resp.ProjectName)
+	fmt.Printf("  embed_model:  %s\n", resp.EmbedModel)
+	fmt.Printf("  mcp_read_key: %s\n", resp.MCPReadKey[:min(30, len(resp.MCPReadKey))]+"...")
+	fmt.Println()
+	fmt.Println("  Next steps:")
+	fmt.Println("  brain setup opencode   # or claude, cursor, gemini, windsurf, all")
+	fmt.Println("  → Restart your IDE and the MCP tools will appear")
+	fmt.Println()
+	fmt.Println("  ⚠️  Store your mcp_read_key — it is shown once.")
+	return nil
 }
 
 // ── tokens ───────────────────────────────────────────────────────────────────
@@ -777,6 +912,22 @@ func filterChunksForDiff(chunksByFile map[string][]chunker.Chunk, diff indexer.D
 	return chunks
 }
 
+func resolveEmbedAPIKey(project brainconfig.ProjectConfig) (string, error) {
+	// Plaintext key (admin local config) takes precedence
+	if strings.TrimSpace(project.EmbedAPIKey) != "" {
+		return strings.TrimSpace(project.EmbedAPIKey), nil
+	}
+	// Encrypted key (from brain join) — decrypt in memory
+	if strings.TrimSpace(project.EmbedAPIKeyEnc) != "" {
+		key, err := braincrypto.Decrypt(strings.TrimSpace(project.EmbedAPIKeyEnc))
+		if err != nil {
+			return "", fmt.Errorf("decrypt embed api key: %w — make sure BRAIN_ENCRYPTION_KEY matches the server", err)
+		}
+		return key, nil
+	}
+	return "", nil
+}
+
 func embedChunks(project brainconfig.ProjectConfig, chunks []chunker.Chunk) ([][]float32, error) {
 	if len(chunks) == 0 {
 		return [][]float32{}, nil
@@ -784,11 +935,16 @@ func embedChunks(project brainconfig.ProjectConfig, chunks []chunker.Chunk) ([][
 	if strings.TrimSpace(project.EmbedModel) == "" {
 		return nil, fmt.Errorf("project embed_model is missing")
 	}
-	if strings.TrimSpace(project.EmbedAPIKey) == "" && !strings.HasPrefix(project.EmbedModel, embedder.ProviderOllama+"/") {
-		return nil, fmt.Errorf("project embed_api_key is missing; re-run `brain register` to store embedder credentials")
+
+	apiKey, err := resolveEmbedAPIKey(project)
+	if err != nil {
+		return nil, err
+	}
+	if apiKey == "" && !strings.HasPrefix(project.EmbedModel, embedder.ProviderOllama+"/") {
+		return nil, fmt.Errorf("embed api key is missing — run `brain join` or `brain register --embed-api-key <key>`")
 	}
 
-	emb, err := embedder.New(project.EmbedModel, project.EmbedAPIKey)
+	emb, err := embedder.New(project.EmbedModel, apiKey)
 	if err != nil {
 		return nil, err
 	}
