@@ -40,9 +40,19 @@ type ProjectJoinConfig struct {
 }
 
 // SaveEmbedAPIKey stores the encrypted embed API key for a project.
-// Uses a direct UPDATE bypassing RLS since this is called from an already-authed handler.
+// Uses a transaction with SET LOCAL to satisfy RLS on the projects table.
 func (s *Store) SaveEmbedAPIKey(ctx context.Context, tenantID, projectID uuid.UUID, encryptedKey string) error {
-	result, err := s.pool.Exec(ctx, `
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tx for save embed key: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	if _, err := tx.Exec(ctx, `SELECT set_config('app.tenant_id', $1, true)`, tenantID.String()); err != nil {
+		return fmt.Errorf("set tenant context: %w", err)
+	}
+
+	result, err := tx.Exec(ctx, `
 		UPDATE projects
 		SET embed_api_key_enc = $1
 		WHERE id = $2 AND tenant_id = $3
@@ -53,7 +63,8 @@ func (s *Store) SaveEmbedAPIKey(ctx context.Context, tenantID, projectID uuid.UU
 	if result.RowsAffected() == 0 {
 		return fmt.Errorf("project not found or not owned by tenant")
 	}
-	return nil
+
+	return tx.Commit(ctx)
 }
 
 // GetEmbedAPIKey returns the encrypted embed API key for a project.
