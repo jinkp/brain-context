@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/Gentleman-Programming/brain-context/internal/version"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/lipgloss"
@@ -25,6 +26,22 @@ func (m Model) View() string {
 
 	b.WriteString(logoStyle.Render(logo))
 	b.WriteString("\n")
+
+	// Update available banner
+	if m.updateStatus == version.StatusUpdateAvailable {
+		banner := fmt.Sprintf("  🆕 Update available: v%s → v%s\n  %s",
+			m.currentVersion, m.latestVersion, m.updateMsg)
+		b.WriteString(lipgloss.NewStyle().
+			Foreground(colorYellow).
+			Bold(true).
+			BorderStyle(lipgloss.NormalBorder()).
+			BorderForeground(colorYellow).
+			Padding(0, 1).
+			MarginBottom(1).
+			Render(banner))
+		b.WriteString("\n")
+	}
+
 	b.WriteString(renderStepBar(int(m.screen)))
 	b.WriteString("\n\n")
 

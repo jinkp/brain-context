@@ -26,10 +26,11 @@ import (
 	"github.com/Gentleman-Programming/brain-context/internal/scanner"
 	braintui "github.com/Gentleman-Programming/brain-context/internal/tui"
 	"github.com/Gentleman-Programming/brain-context/internal/uploader"
+	brainversion "github.com/Gentleman-Programming/brain-context/internal/version"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-const version = "brain-context v0.1.0"
+var version = "v0.1.1" // overridden by -ldflags at build time
 
 var httpClient = &http.Client{Timeout: 30 * time.Second}
 
@@ -91,7 +92,13 @@ func main() {
 	case "join":
 		err = runJoin(os.Args[2:])
 	case "version":
-		fmt.Println(version)
+		fmt.Println("brain-context", version)
+		// Check for update in background
+		result := brainversion.CheckLatest(version)
+		if result.Status == brainversion.StatusUpdateAvailable {
+			fmt.Fprintf(os.Stderr, "\n🆕 Update available: %s → v%s\n   %s\n\n",
+				version, result.LatestVersion, result.Message)
+		}
 		return
 	default:
 		printUsage()
@@ -354,7 +361,7 @@ func runSetupTUI() error {
 	if err != nil {
 		exe = "brain"
 	}
-	m := braintui.New(exe)
+	m := braintui.New(exe, version)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err = p.Run()
 	return err

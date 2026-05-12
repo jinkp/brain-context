@@ -9,6 +9,7 @@
 package tui
 
 import (
+	"github.com/Gentleman-Programming/brain-context/internal/version"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -64,6 +65,9 @@ type loginDoneMsg struct{ err error }
 type setupClientsDoneMsg struct {
 	results map[string]error
 }
+type updateCheckMsg struct {
+	result version.CheckResult
+}
 
 // ─── Model ───────────────────────────────────────────────────────────────────
 
@@ -74,6 +78,12 @@ type Model struct {
 
 	// navigation
 	screen Screen
+
+	// update check
+	updateStatus  version.CheckStatus
+	updateMsg     string
+	latestVersion string
+	currentVersion string
 
 	// step 1 — connect
 	apiInput   textinput.Model
@@ -102,7 +112,7 @@ type Model struct {
 }
 
 // New creates a fresh setup wizard model.
-func New(brainExe string) Model {
+func New(brainExe string, currentVersion string) Model {
 	api := textinput.New()
 	api.Placeholder = "https://brain.mycompany.com"
 	api.Width = 52
@@ -131,17 +141,28 @@ func New(brainExe string) Model {
 	}
 
 	return Model{
-		screen:        ScreenConnect,
-		apiInput:      api,
-		tokenInput:    tok,
-		keyInput:      key,
-		spinner:       sp,
-		clientChecked: checked,
-		brainExe:      brainExe,
+		screen:         ScreenConnect,
+		apiInput:       api,
+		tokenInput:     tok,
+		keyInput:       key,
+		spinner:        sp,
+		clientChecked:  checked,
+		brainExe:       brainExe,
+		currentVersion: currentVersion,
 	}
 }
 
-// Init starts the spinner tick.
+// Init starts the spinner tick and kicks off the update check in background.
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(textinput.Blink, tea.EnterAltScreen)
+	return tea.Batch(
+		textinput.Blink,
+		tea.EnterAltScreen,
+		checkForUpdate(m.currentVersion),
+	)
+}
+
+func checkForUpdate(current string) tea.Cmd {
+	return func() tea.Msg {
+		return updateCheckMsg{result: version.CheckLatest(current)}
+	}
 }

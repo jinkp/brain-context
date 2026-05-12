@@ -45,6 +45,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spinner, cmd = m.spinner.Update(msg)
 		return m, cmd
 
+	case updateCheckMsg:
+		m.updateStatus = msg.result.Status
+		m.updateMsg = msg.result.Message
+		m.latestVersion = msg.result.LatestVersion
+		return m, nil
+
 	case loginDoneMsg: //nolint:govet
 		m.logging = false
 		if msg.err != nil {
