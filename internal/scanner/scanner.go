@@ -18,14 +18,29 @@ type ScannedFile struct {
 }
 
 var ignoredDirs = map[string]struct{}{
-	"node_modules": {},
-	".git":         {},
-	"bin":          {},
-	"obj":          {},
-	"dist":         {},
-	"build":        {},
-	"vendor":       {},
-	"coverage":     {},
+	"node_modules":  {},
+	".git":          {},
+	".opencode":     {},
+	".claude":       {},
+	".cursor":       {},
+	".vscode":       {},
+	".idea":         {},
+	".vs":           {},
+	".atl":          {},
+	".brain":        {},
+	".engram":       {},
+	"bin":           {},
+	"obj":           {},
+	"dist":          {},
+	"build":         {},
+	"vendor":        {},
+	"coverage":      {},
+	"__pycache__":   {},
+	".next":         {},
+	".nuxt":         {},
+	".output":       {},
+	"target":        {},
+	"packages":      {},
 }
 
 var ignoredSuffixes = []string{
@@ -84,14 +99,21 @@ func Scan(root string) ([]ScannedFile, error) {
 			return nil
 		}
 
+		// Skip irregular files (symlinks, devices, pipes)
+		if !entry.Type().IsRegular() {
+			return nil
+		}
+
 		info, err := entry.Info()
 		if err != nil {
-			return fmt.Errorf("read file info %s: %w", path, err)
+			// Skip files we can't stat (broken symlinks, permission issues)
+			return nil
 		}
 
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return fmt.Errorf("read file %s: %w", path, err)
+			// Skip files we can't read (permission denied, locked, etc.)
+			return nil
 		}
 
 		relPath, err := filepath.Rel(absRoot, path)
