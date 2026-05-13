@@ -1004,23 +1004,72 @@ func embedChunks(project brainconfig.ProjectConfig, chunks []chunker.Chunk) ([][
 		return nil, fmt.Errorf("embed api key is missing — run `brain join` or `brain register --embed-api-key <key>`")
 	}
 
+	// Load embedding cache
+	cache, err := embedder.NewCache(project.ProjectID)
+	if err != nil {
+		// Non-fatal — continue without cache
+		cache = nil
+	}
+
+	// Separate cached vs uncached chunks
+	results := make([][]float32, len(chunks))
+	uncachedIdxs := make([]int, 0)
+	uncachedTexts := make([]string, 0)
+	cacheHits := 0
+
+	for i, chunk := range chunks {
+		if cache != nil {
+			if cached := cache.Get(chunk.ChunkHash); cached != nil {
+				results[i] = cached
+				cacheHits++
+				continue
+			}
+		}
+		uncachedIdxs = append(uncachedIdxs, i)
+		uncachedTexts = append(uncachedTexts, chunk.Content)
+	}
+
+	if cacheHits > 0 {
+		fmt.Printf("   ⚡ %d/%d from cache, %d to embed\n", cacheHits, len(chunks), len(uncachedTexts))
+	}
+
+	if len(uncachedTexts) == 0 {
+		return results, nil
+	}
+
 	emb, err := embedder.New(project.EmbedModel, apiKey)
 	if err != nil {
 		return nil, err
 	}
 
-	texts := make([]string, 0, len(chunks))
-	for _, chunk := range chunks {
-		texts = append(texts, chunk.Content)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	vectors, embedErr := emb.Embed(ctx, uncachedTexts)
+
+	// Cache whatever we got — even partial results
+	for j := 0; j < len(vectors); j++ {
+		if j < len(uncachedIdxs) {
+			results[uncachedIdxs[j]] = vectors[j]
+			if cache != nil {
+				cache.Set(chunks[uncachedIdxs[j]].ChunkHash, vectors[j])
+			}
+		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	vectors, err := emb.Embed(ctx, texts)
-	if err != nil {
-		return nil, fmt.Errorf("embed chunks: %w", err)
+	// Save cache to disk — even on error, preserves progress
+	if cache != nil {
+		if saveErr := cache.Save(); saveErr != nil {
+			fmt.Fprintf(os.Stderr, "⚠️  cache save failed: %v\n", saveErr)
+		} else if len(vectors) > 0 {
+			fmt.Printf("   💾 %d embeddings cached to disk\n", cache.Len())
+		}
 	}
-	return vectors, nil
+
+	if embedErr != nil {
+		return nil, fmt.Errorf("embed chunks: %w\n   Re-run the same command — cached embeddings will be reused", embedErr)
+	}
+
+	return results, nil
 }
 
 func buildUploadPayloads(chunks []chunker.Chunk, embeddings [][]float32) ([]uploader.ChunkPayload, error) {

@@ -72,7 +72,8 @@ func (e *openAIEmbedder) Embed(ctx context.Context, texts []string) ([][]float32
 
 		embeddings, err := e.embedBatch(ctx, batch)
 		if err != nil {
-			return nil, err
+			// Return partial results so cache can save what we got
+			return result, fmt.Errorf("batch %d/%d failed: %w (previous batches cached)", batchNum, totalBatches, err)
 		}
 		result = append(result, embeddings...)
 	}
