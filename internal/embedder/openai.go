@@ -48,7 +48,7 @@ func (e *openAIEmbedder) Dimensions() int {
 	return e.dimensions
 }
 
-const openAIBatchSize = 100
+const openAIBatchSize = 50 // OpenAI limit is 300K tokens/request — 50 chunks keeps us safely under
 
 func (e *openAIEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
 	if strings.TrimSpace(e.apiKey) == "" {
