@@ -218,10 +218,53 @@ This gives a simple operational model: run the stateless Go API in Compute Engin
   - `brn_mcp_xxx` — MCP read only
 - All tokens expire after 90 days and must be renewed manually.
 
+## Agent Instructions (IMPORTANT)
+
+After indexing your project, add this to your project's `AGENTS.md` (or equivalent prompt file) so your AI agent **uses brain-context automatically** instead of scanning files:
+
+```markdown
+## brain-context
+
+When answering questions about this project's code, ALWAYS use brain-context MCP tools FIRST
+before reading files directly:
+
+- `search_project_context(project_id="<your-project-name>", query="...")` — find relevant code
+- `get_file_summary(project_id="<your-project-name>", path="...")` — understand a file
+- `explain_flow(project_id="<your-project-name>", query="...")` — trace a feature end-to-end
+- `find_impact(project_id="<your-project-name>", entity="...")` — find what a change affects
+
+Only read files directly if brain-context doesn't return enough context.
+```
+
+Replace `<your-project-name>` with the name you used in `brain register --project <name>`.
+
+### Why this matters
+
+Without these instructions, AI agents default to reading files directly — scanning hundreds of files,
+consuming tokens, and missing relationships between symbols. With brain-context, the agent gets
+focused, pre-indexed context in milliseconds.
+
+### Example
+
+```
+You:    "How does the payment processing work?"
+
+Agent WITHOUT brain-context:
+  → Reads 30+ files trying to find relevant code
+  → Consumes ~50,000 tokens of context
+  → Might miss important relationships
+
+Agent WITH brain-context:
+  → Calls search_project_context("how does payment processing work")
+  → Gets 6-8 relevant chunks with scores and relationships
+  → Consumes ~1,000 tokens of context
+  → Responds faster and more accurately
+```
+
 ## Contributing
 
 Contributions are welcome. Please open an issue first to discuss bugs, features, or design changes:
 
-- GitHub Issues: https://github.com/<your-org>/brain-context/issues
+- GitHub Issues: https://github.com/jinkp/brain-context/issues
 
 If you are working locally, review the CLI and API architecture above before adding features so changes remain aligned with the local-first, raw-code-never-leaves-machine model.
