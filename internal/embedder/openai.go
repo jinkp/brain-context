@@ -40,7 +40,7 @@ func newOpenAIEmbedder(model, apiKey string, dimensions int) Embedder {
 		model:      strings.TrimPrefix(model, ProviderOpenAI+"/"),
 		apiKey:     strings.TrimSpace(apiKey),
 		dimensions: dimensions,
-		client:     &http.Client{Timeout: 30 * time.Second},
+		client:     &http.Client{Timeout: 120 * time.Second},
 	}
 }
 
@@ -48,10 +48,39 @@ func (e *openAIEmbedder) Dimensions() int {
 	return e.dimensions
 }
 
+const openAIBatchSize = 100
+
 func (e *openAIEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
 	if strings.TrimSpace(e.apiKey) == "" {
 		return nil, fmt.Errorf("openai api key is required")
 	}
+
+	result := make([][]float32, 0, len(texts))
+	totalBatches := (len(texts) + openAIBatchSize - 1) / openAIBatchSize
+
+	for i := 0; i < len(texts); i += openAIBatchSize {
+		end := i + openAIBatchSize
+		if end > len(texts) {
+			end = len(texts)
+		}
+		batch := texts[i:end]
+		batchNum := i/openAIBatchSize + 1
+
+		if totalBatches > 1 {
+			fmt.Printf("   batch %d/%d (%d chunks)...\n", batchNum, totalBatches, len(batch))
+		}
+
+		embeddings, err := e.embedBatch(ctx, batch)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, embeddings...)
+	}
+
+	return result, nil
+}
+
+func (e *openAIEmbedder) embedBatch(ctx context.Context, texts []string) ([][]float32, error) {
 	payload, err := json.Marshal(openAIRequest{
 		Model:      e.model,
 		Input:      texts,

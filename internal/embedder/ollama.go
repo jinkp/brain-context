@@ -39,7 +39,7 @@ func newOllamaEmbedder(model string, dimensions int) Embedder {
 		model:      strings.TrimPrefix(model, ProviderOllama+"/"),
 		dimensions: dimensions,
 		endpoint:   endpoint + "/api/embeddings",
-		client:     &http.Client{Timeout: 30 * time.Second},
+		client:     &http.Client{Timeout: 120 * time.Second},
 	}
 }
 

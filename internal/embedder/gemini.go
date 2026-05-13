@@ -55,7 +55,7 @@ func newGeminiEmbedder(model, apiKey string, dimensions int) Embedder {
 		model:      strings.TrimPrefix(model, ProviderGemini+"/"),
 		apiKey:     strings.TrimSpace(apiKey),
 		dimensions: dimensions,
-		client:     &http.Client{Timeout: 30 * time.Second},
+		client:     &http.Client{Timeout: 120 * time.Second},
 	}
 }
 
