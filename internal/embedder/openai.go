@@ -48,7 +48,7 @@ func (e *openAIEmbedder) Dimensions() int {
 	return e.dimensions
 }
 
-const openAIBatchSize = 50 // OpenAI limit is 300K tokens/request — 50 chunks keeps us safely under
+const openAIBatchSize = 25 // Conservative: 25 chunks × ~5K tokens = ~125K tokens per request (limit 300K)
 
 func (e *openAIEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
 	if strings.TrimSpace(e.apiKey) == "" {
@@ -81,12 +81,12 @@ func (e *openAIEmbedder) Embed(ctx context.Context, texts []string) ([][]float32
 	return result, nil
 }
 
-const openAIMaxTokensPerInput = 8000 // OpenAI limit is 8192, leave margin
+const openAIMaxCharsPerInput = 20000 // ~5000 tokens — well under OpenAI's 8192 token limit
 
 func (e *openAIEmbedder) embedBatch(ctx context.Context, texts []string) ([][]float32, error) {
-	// Truncate any input that exceeds the token limit (~4 chars per token)
+	// Truncate any input that exceeds the character limit
 	truncated := make([]string, len(texts))
-	maxChars := openAIMaxTokensPerInput * 4
+	maxChars := openAIMaxCharsPerInput
 	for i, t := range texts {
 		if len(t) > maxChars {
 			truncated[i] = t[:maxChars]
