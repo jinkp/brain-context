@@ -773,11 +773,13 @@ func runIndexCommand(args []string, incremental bool) error {
 	fs := flag.NewFlagSet(commandName, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	projectName := fs.String("project", "", "project name")
-	upload := fs.Bool("upload", false, "deprecated: upload happens automatically")
+	stack := fs.String("stack", "", "stack filter: go, dotnet, react, vue, angular, node, python, java, rust, ruby, php")
+	include := fs.String("include", "", "extra extensions to include, comma-separated (e.g. .proto,.graphql)")
+	exclude := fs.String("exclude", "", "directories to exclude, comma-separated (e.g. assets,Migrations,Tests)")
+	verbose := fs.Bool("verbose", false, "show each file as it's scanned")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("parse %s flags: %w", commandName, err)
 	}
-	_ = upload
 	if strings.TrimSpace(*projectName) == "" {
 		return fmt.Errorf("--project is required")
 	}
@@ -813,8 +815,32 @@ func runIndexCommand(args []string, incremental bool) error {
 		}
 	}
 
-	fmt.Printf("⏳ Scanning %s...\n", project.RepoPath)
-	files, chunksByFile, allChunks, err := buildProjectChunks(project.RepoPath)
+	// Build scan options from flags
+	scanOpts := scanner.ScanOptions{
+		Stack:   strings.TrimSpace(*stack),
+		Verbose: *verbose,
+	}
+	if *include != "" {
+		for _, ext := range strings.Split(*include, ",") {
+			scanOpts.Include = append(scanOpts.Include, strings.TrimSpace(ext))
+		}
+	}
+	if *exclude != "" {
+		for _, dir := range strings.Split(*exclude, ",") {
+			scanOpts.Exclude = append(scanOpts.Exclude, strings.TrimSpace(dir))
+		}
+	}
+	if scanOpts.Stack != "" {
+		fmt.Printf("⏳ Scanning %s (stack: %s)...\n", project.RepoPath, scanOpts.Stack)
+	} else {
+		fmt.Printf("⏳ Scanning %s...\n", project.RepoPath)
+	}
+	if scanOpts.Verbose {
+		scanOpts.OnFile = func(path string) {
+			fmt.Printf("   📄 %s\n", path)
+		}
+	}
+	files, chunksByFile, allChunks, err := buildProjectChunks(project.RepoPath, scanOpts)
 	if err != nil {
 		return err
 	}
@@ -885,8 +911,8 @@ func runIndexCommand(args []string, incremental bool) error {
 	return nil
 }
 
-func buildProjectChunks(repoPath string) ([]scanner.ScannedFile, map[string][]chunker.Chunk, []chunker.Chunk, error) {
-	files, err := scanner.Scan(repoPath)
+func buildProjectChunks(repoPath string, opts ...scanner.ScanOptions) ([]scanner.ScannedFile, map[string][]chunker.Chunk, []chunker.Chunk, error) {
+	files, err := scanner.Scan(repoPath, opts...)
 	if err != nil {
 		return nil, nil, nil, err
 	}
