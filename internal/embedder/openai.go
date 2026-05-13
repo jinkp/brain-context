@@ -81,21 +81,7 @@ func (e *openAIEmbedder) Embed(ctx context.Context, texts []string) ([][]float32
 	return result, nil
 }
 
-const openAIMaxCharsPerInput = 8000 // ~2000 tokens — safely under OpenAI's 8192 token limit
-
 func (e *openAIEmbedder) embedBatch(ctx context.Context, texts []string) ([][]float32, error) {
-	// Truncate any input that exceeds the character limit
-	truncated := make([]string, len(texts))
-	maxChars := openAIMaxCharsPerInput
-	for i, t := range texts {
-		if len(t) > maxChars {
-			truncated[i] = t[:maxChars]
-		} else {
-			truncated[i] = t
-		}
-	}
-	texts = truncated
-
 	payload, err := json.Marshal(openAIRequest{
 		Model:      e.model,
 		Input:      texts,
