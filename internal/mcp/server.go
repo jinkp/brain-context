@@ -21,6 +21,7 @@ type Server struct {
 	apiEndpoint      string
 	defaultProjectID string
 	projectsByID     map[string]brainconfig.ProjectConfig
+	projectsByName   map[string]string // name → project_id
 	httpClient       *http.Client
 }
 
@@ -34,16 +35,19 @@ func New(defaultProjectName string) (*Server, error) {
 	}
 
 	projectsByID := make(map[string]brainconfig.ProjectConfig, len(cfg.Projects))
-	for _, project := range cfg.Projects {
+	projectsByName := make(map[string]string, len(cfg.Projects))
+	for name, project := range cfg.Projects {
 		if id := strings.TrimSpace(project.ProjectID); id != "" {
 			projectsByID[id] = project
+			projectsByName[strings.ToLower(strings.TrimSpace(name))] = id
 		}
 	}
 
 	srv := &Server{
-		apiEndpoint:  strings.TrimRight(strings.TrimSpace(cfg.APIEndpoint), "/"),
-		projectsByID: projectsByID,
-		httpClient:   &http.Client{Timeout: 30 * time.Second},
+		apiEndpoint:    strings.TrimRight(strings.TrimSpace(cfg.APIEndpoint), "/"),
+		projectsByID:   projectsByID,
+		projectsByName: projectsByName,
+		httpClient:     &http.Client{Timeout: 30 * time.Second},
 	}
 	if strings.TrimSpace(defaultProjectName) != "" {
 		project, ok := cfg.Projects[strings.TrimSpace(defaultProjectName)]

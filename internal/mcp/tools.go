@@ -111,7 +111,7 @@ type apiErrorResponse struct {
 func searchProjectContextTool() mcpgo.Tool {
 	return mcpgo.NewTool("search_project_context",
 		mcpgo.WithDescription("Search relevant code context for a question"),
-		mcpgo.WithString("project_id", mcpgo.Required(), mcpgo.Description("Project ID")),
+		mcpgo.WithString("project_id", mcpgo.Required(), mcpgo.Description("Project ID or project name")),
 		mcpgo.WithString("query", mcpgo.Required(), mcpgo.Description("Natural language question")),
 		mcpgo.WithNumber("max_chunks", mcpgo.Description("Max chunks to return (default 8, max 20)")),
 	)
@@ -120,7 +120,7 @@ func searchProjectContextTool() mcpgo.Tool {
 func getFileSummaryTool() mcpgo.Tool {
 	return mcpgo.NewTool("get_file_summary",
 		mcpgo.WithDescription("Get the indexed summary for a file"),
-		mcpgo.WithString("project_id", mcpgo.Required(), mcpgo.Description("Project ID")),
+		mcpgo.WithString("project_id", mcpgo.Required(), mcpgo.Description("Project ID or project name")),
 		mcpgo.WithString("path", mcpgo.Required(), mcpgo.Description("File path relative to repo root")),
 	)
 }
@@ -128,7 +128,7 @@ func getFileSummaryTool() mcpgo.Tool {
 func getRelatedFilesTool() mcpgo.Tool {
 	return mcpgo.NewTool("get_related_files",
 		mcpgo.WithDescription("Find related files from indexed relationships"),
-		mcpgo.WithString("project_id", mcpgo.Required(), mcpgo.Description("Project ID")),
+		mcpgo.WithString("project_id", mcpgo.Required(), mcpgo.Description("Project ID or project name")),
 		mcpgo.WithString("path", mcpgo.Required(), mcpgo.Description("File path relative to repo root")),
 		mcpgo.WithNumber("max_depth", mcpgo.Description("Traversal depth (default 1)")),
 	)
@@ -137,7 +137,7 @@ func getRelatedFilesTool() mcpgo.Tool {
 func explainFlowTool() mcpgo.Tool {
 	return mcpgo.NewTool("explain_flow",
 		mcpgo.WithDescription("Explain a flow using retrieved code relationships"),
-		mcpgo.WithString("project_id", mcpgo.Required(), mcpgo.Description("Project ID")),
+		mcpgo.WithString("project_id", mcpgo.Required(), mcpgo.Description("Project ID or project name")),
 		mcpgo.WithString("query", mcpgo.Required(), mcpgo.Description("Flow to explain, for example login flow")),
 	)
 }
@@ -145,7 +145,7 @@ func explainFlowTool() mcpgo.Tool {
 func findImpactTool() mcpgo.Tool {
 	return mcpgo.NewTool("find_impact",
 		mcpgo.WithDescription("Find impacted files and symbols for an entity"),
-		mcpgo.WithString("project_id", mcpgo.Required(), mcpgo.Description("Project ID")),
+		mcpgo.WithString("project_id", mcpgo.Required(), mcpgo.Description("Project ID or project name")),
 		mcpgo.WithString("entity", mcpgo.Required(), mcpgo.Description("Entity name, for example AuthService")),
 	)
 }
@@ -278,14 +278,26 @@ func (s *Server) searchContext(ctx context.Context, projectID string, project br
 }
 
 func (s *Server) resolveProject(req mcpgo.CallToolRequest) (string, brainconfig.ProjectConfig, error) {
-	projectID := strings.TrimSpace(req.GetString("project_id", ""))
-	if projectID == "" {
-		projectID = s.defaultProjectID
+	input := strings.TrimSpace(req.GetString("project_id", ""))
+	if input == "" {
+		input = s.defaultProjectID
 	}
-	if projectID == "" {
+	if input == "" {
 		return "", brainconfig.ProjectConfig{}, fmt.Errorf("project_id is required")
 	}
+
+	// Try by UUID first
+	projectID := input
 	project, ok := s.projectsByID[projectID]
+
+	// If not found by UUID, try by project name (case-insensitive)
+	if !ok {
+		if resolvedID, found := s.projectsByName[strings.ToLower(input)]; found {
+			projectID = resolvedID
+			project, ok = s.projectsByID[projectID]
+		}
+	}
+
 	if !ok {
 		return "", brainconfig.ProjectConfig{}, projectNotRegisteredError{}
 	}
