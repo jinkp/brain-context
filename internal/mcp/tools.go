@@ -110,16 +110,16 @@ type apiErrorResponse struct {
 
 func searchProjectContextTool() mcpgo.Tool {
 	return mcpgo.NewTool("search_project_context",
-		mcpgo.WithDescription("Search relevant code context for a question"),
+		mcpgo.WithDescription("Search relevant code context for a question. Use this tool BEFORE reading files — it returns pre-indexed, semantically ranked code snippets from the project. Much faster and cheaper than scanning files directly. Returns function names, file paths, line numbers, and relevance scores."),
 		mcpgo.WithString("project_id", mcpgo.Required(), mcpgo.Description("Project ID or project name")),
-		mcpgo.WithString("query", mcpgo.Required(), mcpgo.Description("Natural language question")),
+		mcpgo.WithString("query", mcpgo.Required(), mcpgo.Description("Natural language question about the codebase, e.g. 'how does payment processing work' or 'where is user authentication handled'")),
 		mcpgo.WithNumber("max_chunks", mcpgo.Description("Max chunks to return (default 8, max 20)")),
 	)
 }
 
 func getFileSummaryTool() mcpgo.Tool {
 	return mcpgo.NewTool("get_file_summary",
-		mcpgo.WithDescription("Get the indexed summary for a file"),
+		mcpgo.WithDescription("Get the indexed summary for a file — lists all symbols (functions, classes, methods) with their line ranges. Use this instead of reading a file when you only need to understand its structure."),
 		mcpgo.WithString("project_id", mcpgo.Required(), mcpgo.Description("Project ID or project name")),
 		mcpgo.WithString("path", mcpgo.Required(), mcpgo.Description("File path relative to repo root")),
 	)
@@ -127,7 +127,7 @@ func getFileSummaryTool() mcpgo.Tool {
 
 func getRelatedFilesTool() mcpgo.Tool {
 	return mcpgo.NewTool("get_related_files",
-		mcpgo.WithDescription("Find related files from indexed relationships"),
+		mcpgo.WithDescription("Find files related to a given file by dependencies, imports, calls, or shared symbols. Use this to understand how a file connects to the rest of the codebase without reading every file."),
 		mcpgo.WithString("project_id", mcpgo.Required(), mcpgo.Description("Project ID or project name")),
 		mcpgo.WithString("path", mcpgo.Required(), mcpgo.Description("File path relative to repo root")),
 		mcpgo.WithNumber("max_depth", mcpgo.Description("Traversal depth (default 1)")),
@@ -136,17 +136,17 @@ func getRelatedFilesTool() mcpgo.Tool {
 
 func explainFlowTool() mcpgo.Tool {
 	return mcpgo.NewTool("explain_flow",
-		mcpgo.WithDescription("Explain a flow using retrieved code relationships"),
+		mcpgo.WithDescription("Explain a functional flow (like login, payment, order creation) by retrieving all related code symbols and their relationships. Returns a comprehensive view of how a feature works across multiple files. Use this for architecture questions or understanding end-to-end flows."),
 		mcpgo.WithString("project_id", mcpgo.Required(), mcpgo.Description("Project ID or project name")),
-		mcpgo.WithString("query", mcpgo.Required(), mcpgo.Description("Flow to explain, for example login flow")),
+		mcpgo.WithString("query", mcpgo.Required(), mcpgo.Description("Flow to explain, for example 'login flow', 'payment processing', 'order creation'")),
 	)
 }
 
 func findImpactTool() mcpgo.Tool {
 	return mcpgo.NewTool("find_impact",
-		mcpgo.WithDescription("Find impacted files and symbols for an entity"),
+		mcpgo.WithDescription("Find all files and symbols impacted by modifying a given entity (class, function, table, service). Use this before making changes to understand the blast radius and avoid breaking dependent code."),
 		mcpgo.WithString("project_id", mcpgo.Required(), mcpgo.Description("Project ID or project name")),
-		mcpgo.WithString("entity", mcpgo.Required(), mcpgo.Description("Entity name, for example AuthService")),
+		mcpgo.WithString("entity", mcpgo.Required(), mcpgo.Description("Entity name, for example AuthService, Users table, PaymentController")),
 	)
 }
 

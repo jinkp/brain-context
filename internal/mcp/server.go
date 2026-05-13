@@ -61,11 +61,20 @@ func New(defaultProjectName string) (*Server, error) {
 }
 
 func (s *Server) Start() error {
+	// Build instructions with available projects
+	instructions := "brain-context provides pre-indexed code search for software projects. " +
+		"Use these tools BEFORE reading files directly — they are faster, cheaper, and return semantically ranked results.\n\n" +
+		"Available projects: " + s.listProjectNames() + "\n\n" +
+		"When the user asks about code, architecture, flows, or impact analysis, " +
+		"call search_project_context or explain_flow FIRST. " +
+		"Only fall back to reading files if these tools don't return enough context."
+
 	mcpServer := server.NewMCPServer(
 		serverName,
 		serverVersion,
 		server.WithToolCapabilities(true),
 		server.WithRecovery(),
+		server.WithInstructions(instructions),
 	)
 
 	s.registerTools(mcpServer)
@@ -83,6 +92,17 @@ func (s *Server) registerTools(mcpServer *server.MCPServer) {
 	mcpServer.AddTool(getRelatedFilesTool(), s.handleGetRelatedFiles)
 	mcpServer.AddTool(explainFlowTool(), s.handleExplainFlow)
 	mcpServer.AddTool(findImpactTool(), s.handleFindImpact)
+}
+
+func (s *Server) listProjectNames() string {
+	names := make([]string, 0, len(s.projectsByName))
+	for name := range s.projectsByName {
+		names = append(names, name)
+	}
+	if len(names) == 0 {
+		return "(none configured — run brain register)"
+	}
+	return strings.Join(names, ", ")
 }
 
 func textResult(text string) *mcpgo.CallToolResult {
