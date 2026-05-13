@@ -813,10 +813,12 @@ func runIndexCommand(args []string, incremental bool) error {
 		}
 	}
 
+	fmt.Printf("⏳ Scanning %s...\n", project.RepoPath)
 	files, chunksByFile, allChunks, err := buildProjectChunks(project.RepoPath)
 	if err != nil {
 		return err
 	}
+	fmt.Printf("   %d files scanned, %d chunks extracted\n", len(files), len(allChunks))
 
 	diff := indexer.DiffResult{
 		NewFiles:       []string{},
@@ -843,16 +845,23 @@ func runIndexCommand(args []string, incremental bool) error {
 		}
 	}
 
+	if len(chunksToEmbed) == 0 {
+		fmt.Println("✅ No changes detected — index is up to date")
+		return nil
+	}
+	fmt.Printf("⏳ Embedding %d chunks...\n", len(chunksToEmbed))
 	embeddings, err := embedChunks(project, chunksToEmbed)
 	if err != nil {
 		return err
 	}
+	fmt.Println("   Embeddings generated")
 	uploadPayloads, err := buildUploadPayloads(chunksToEmbed, embeddings)
 	if err != nil {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	fmt.Printf("⏳ Uploading to %s...\n", cfg.APIEndpoint)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	uploadResult, err := uploader.Client{
 		BaseURL:      cfg.APIEndpoint,
@@ -863,6 +872,7 @@ func runIndexCommand(args []string, incremental bool) error {
 	if err != nil {
 		return err
 	}
+	fmt.Println("   Upload complete")
 	if err := indexer.SaveSnapshot(project.ProjectID, files, chunksByFile); err != nil {
 		return fmt.Errorf("save snapshot: %w", err)
 	}
