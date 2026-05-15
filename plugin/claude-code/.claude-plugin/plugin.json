@@ -1,0 +1,11 @@
+{
+  "name": "brain-context",
+  "description": "Pre-indexed code intelligence for AI agents. Semantic search, flow analysis, impact detection — without scanning files.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Gentleman Programming"
+  },
+  "homepage": "https://github.com/Gentleman-Programming/brain-context",
+  "repository": "https://github.com/Gentleman-Programming/brain-context",
+  "license": "MIT"
+}

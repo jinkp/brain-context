@@ -1,0 +1,22 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "brain-context",
+  "description": "Pre-indexed code intelligence for AI agents — semantic search, flow analysis, impact detection without scanning files",
+  "owner": {
+    "name": "Gentleman Programming",
+    "email": "gentlemanprogramming.dev@gmail.com"
+  },
+  "plugins": [
+    {
+      "name": "brain-context",
+      "description": "Code intelligence MCP with protocol injection. Gives Claude pre-indexed semantic search, flow tracing, and impact analysis across your codebase.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Gentleman Programming"
+      },
+      "source": "./plugin/claude-code",
+      "category": "productivity",
+      "homepage": "https://github.com/Gentleman-Programming/brain-context"
+    }
+  ]
+}

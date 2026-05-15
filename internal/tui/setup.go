@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // setupClient configures the MCP entry for the given client.
@@ -53,6 +54,7 @@ func setupOpenCode(home, brainExe string) error {
 		cfg = map[string]any{}
 	}
 
+	// 1. Inject MCP entry
 	mcp := getOrCreateMap(cfg, "mcp")
 	mcp["brain-context"] = map[string]any{
 		"type":    "local",
@@ -60,23 +62,36 @@ func setupOpenCode(home, brainExe string) error {
 	}
 	cfg["mcp"] = mcp
 
-	return writeJSONMap(path, cfg)
+	if err := writeJSONMap(path, cfg); err != nil {
+		return err
+	}
+
+	// 2. Inject protocol into the prompt file referenced by an agent
+	configDir := filepath.Dir(path)
+	promptFile := findOpenCodePromptFile(cfg, configDir)
+	if promptFile == "" {
+		// No agent references a {file:...} prompt — create AGENTS.md next to opencode.json
+		promptFile = filepath.Join(configDir, "AGENTS.md")
+	}
+
+	return injectProtocolIntoFile(promptFile)
 }
 
 // ── Claude Code ───────────────────────────────────────────────────────────────
 
 func setupClaude(home, brainExe string) error {
-	candidates := []string{
+	// 1. Inject MCP entry into settings.json
+	settingsCandidates := []string{
 		filepath.Join(home, ".claude", "settings.json"),
 		filepath.Join(home, "Library", "Application Support", "Claude", "settings.json"),
 		filepath.Join(os.Getenv("APPDATA"), "Claude", "settings.json"),
 	}
-	path := firstExisting(candidates)
-	if path == "" {
-		path = candidates[0]
+	settingsPath := firstExisting(settingsCandidates)
+	if settingsPath == "" {
+		settingsPath = settingsCandidates[0]
 	}
 
-	cfg, err := readJSONMap(path)
+	cfg, err := readJSONMap(settingsPath)
 	if err != nil {
 		cfg = map[string]any{}
 	}
@@ -88,7 +103,15 @@ func setupClaude(home, brainExe string) error {
 	}
 	cfg["mcpServers"] = mcpServers
 
-	return writeJSONMap(path, cfg)
+	if err := writeJSONMap(settingsPath, cfg); err != nil {
+		return err
+	}
+
+	// 2. Inject protocol into CLAUDE.md (global instructions file)
+	claudeDir := filepath.Dir(settingsPath)
+	claudeMD := filepath.Join(claudeDir, "CLAUDE.md")
+
+	return injectProtocolIntoFile(claudeMD)
 }
 
 // ── Cursor ────────────────────────────────────────────────────────────────────
@@ -215,4 +238,88 @@ func firstExisting(paths []string) string {
 		}
 	}
 	return ""
+}
+
+// ── Protocol injection helpers ───────────────────────────────────────────────
+
+// findOpenCodePromptFile looks through the agent configs in opencode.json
+// for the first primary agent with a {file:...} prompt reference and returns
+// the resolved absolute path. Returns "" if none found.
+func findOpenCodePromptFile(cfg map[string]any, configDir string) string {
+	agents, ok := cfg["agent"]
+	if !ok {
+		return ""
+	}
+	agentMap, ok := agents.(map[string]any)
+	if !ok {
+		return ""
+	}
+
+	// Look for the first primary agent with a file-referenced prompt
+	for _, agentCfg := range agentMap {
+		agent, ok := agentCfg.(map[string]any)
+		if !ok {
+			continue
+		}
+		prompt, ok := agent["prompt"].(string)
+		if !ok {
+			continue
+		}
+		// Match {file:./path} or {file:path}
+		if !strings.HasPrefix(prompt, "{file:") || !strings.HasSuffix(prompt, "}") {
+			continue
+		}
+		relPath := strings.TrimSuffix(strings.TrimPrefix(prompt, "{file:"), "}")
+		relPath = strings.TrimSpace(relPath)
+		if relPath == "" {
+			continue
+		}
+		// Resolve relative to config directory
+		if !filepath.IsAbs(relPath) {
+			return filepath.Join(configDir, relPath)
+		}
+		return relPath
+	}
+	return ""
+}
+
+// injectProtocolIntoFile injects or updates the brain-context protocol block
+// in a markdown/text file using marker comments. Non-destructive:
+//   - If markers exist → replaces ONLY the content between them
+//   - If markers don't exist → appends the block at the end
+//   - If file doesn't exist → creates it with the block
+//   - All other content is preserved untouched
+func injectProtocolIntoFile(path string) error {
+	protocol := wrappedProtocol()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// File doesn't exist — create it with just the protocol
+			if mkErr := os.MkdirAll(filepath.Dir(path), 0755); mkErr != nil {
+				return fmt.Errorf("create directory for %s: %w", path, mkErr)
+			}
+			return os.WriteFile(path, []byte(protocol+"\n"), 0644)
+		}
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+
+	content := string(data)
+	startIdx := strings.Index(content, markerStart)
+	endIdx := strings.Index(content, markerEnd)
+
+	if startIdx >= 0 && endIdx >= 0 && endIdx > startIdx {
+		// Markers exist — replace the section between them (inclusive)
+		updated := content[:startIdx] + protocol + content[endIdx+len(markerEnd):]
+		return os.WriteFile(path, []byte(updated), 0644)
+	}
+
+	// No markers found — append at the end, separated by a blank line
+	separator := "\n\n"
+	trimmed := strings.TrimRight(content, " \t\r\n")
+	if trimmed == "" {
+		separator = ""
+	}
+	updated := trimmed + separator + protocol + "\n"
+	return os.WriteFile(path, []byte(updated), 0644)
 }

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "brain-context": {
+      "command": "brain",
+      "args": ["mcp"]
+    }
+  }
+}
