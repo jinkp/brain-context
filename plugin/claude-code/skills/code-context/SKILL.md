@@ -20,7 +20,7 @@ Tools are loaded automatically at session start by the UserPromptSubmit hook.
 
 **Fallback**: If tools are unexpectedly unavailable, trigger ToolSearch manually:
 ```
-select:mcp__plugin_brain_context__search_project_context,mcp__plugin_brain_context__get_file_summary,mcp__plugin_brain_context__get_related_files,mcp__plugin_brain_context__explain_flow,mcp__plugin_brain_context__find_impact
+select:mcp__plugin_brain_context_brain_context__search_project_context,mcp__plugin_brain_context_brain_context__get_file_summary,mcp__plugin_brain_context_brain_context__get_related_files,mcp__plugin_brain_context_brain_context__explain_flow,mcp__plugin_brain_context_brain_context__find_impact
 ```
 
 ## PRIORITY RULE (mandatory)

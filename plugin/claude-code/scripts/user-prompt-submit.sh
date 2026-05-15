@@ -26,7 +26,9 @@ if [ ! -f "$STATE_FILE" ]; then
   # First message — force tool loading
   touch "$STATE_FILE" 2>/dev/null || true
 
-  TOOL_MSG="Load brain-context tools NOW before responding:"$'\n'"select:mcp__plugin_brain_context__search_project_context,mcp__plugin_brain_context__get_file_summary,mcp__plugin_brain_context__get_related_files,mcp__plugin_brain_context__explain_flow,mcp__plugin_brain_context__find_impact"
+  # Tool name pattern: mcp__plugin_{marketplace}_{plugin}__{tool}
+  # Marketplace and plugin are both "brain-context" → normalized to "brain_context"
+  TOOL_MSG="Load brain-context tools NOW before responding:"$'\n'"select:mcp__plugin_brain_context_brain_context__search_project_context,mcp__plugin_brain_context_brain_context__get_file_summary,mcp__plugin_brain_context_brain_context__get_related_files,mcp__plugin_brain_context_brain_context__explain_flow,mcp__plugin_brain_context_brain_context__find_impact"
   OUTPUT=$(jq -n --arg msg "$TOOL_MSG" '{"systemMessage": $msg}')
 
   printf '%s\n' "$OUTPUT"
