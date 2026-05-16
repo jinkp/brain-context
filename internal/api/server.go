@@ -30,6 +30,7 @@ func NewServer(st *store.Store) *echo.Echo {
 	tenantOnly.DELETE("/auth/keys/:id", h.RevokeKey)
 	tenantOnly.POST("/projects", h.CreateProject)
 	tenantOnly.GET("/projects/:id", h.GetProject)
+	tenantOnly.DELETE("/projects/:id", h.DeleteProject)
 	tenantOnly.PATCH("/projects/:id/embed-key", h.UpdateEmbedKey)
 	tenantOnly.GET("/admin/metrics", h.GetMetrics)
 	tenantOnly.POST("/projects/:id/tokens", h.CreateProjectTokens)

@@ -139,6 +139,24 @@ func (h *Handler) UpdateEmbedKey(c echo.Context) error {
 	})
 }
 
+func (h *Handler) DeleteProject(c echo.Context) error {
+	tenantID, ok := tenantIDFromContext(c)
+	if !ok {
+		return writeError(c, http.StatusUnauthorized, "UNAUTHORIZED", "missing tenant context")
+	}
+
+	projectID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return writeError(c, http.StatusBadRequest, "VALIDATION_ERROR", "invalid project id")
+	}
+
+	if err := h.store.DeleteProject(c.Request().Context(), tenantID, projectID); err != nil {
+		return handleStoreError(c, err)
+	}
+
+	return c.NoContent(http.StatusNoContent)
+}
+
 func (h *Handler) GetProject(c echo.Context) error {
 	tenantID, ok := tenantIDFromContext(c)
 	if !ok {

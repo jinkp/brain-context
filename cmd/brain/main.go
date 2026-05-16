@@ -382,6 +382,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  brain tokens list    --project <name>")
 	fmt.Fprintln(os.Stderr, "  brain tokens renew   --project <name>")
 	fmt.Fprintln(os.Stderr, "  brain projects                  list registered projects")
+	fmt.Fprintln(os.Stderr, "  brain projects delete --project <name>  remove a project")
 	fmt.Fprintln(os.Stderr, "  brain mcp            [--project <name>]")
 	fmt.Fprintln(os.Stderr, "  brain tui                       interactive TUI (wizard, client setup, update)")
 	fmt.Fprintln(os.Stderr, "  brain tui clients               TUI — client selection only")
@@ -682,7 +683,14 @@ func min(a, b int) int {
 
 // ── projects ─────────────────────────────────────────────────────────────────
 
-func runProjects(_ []string) error {
+func runProjects(args []string) error {
+	if len(args) > 0 && args[0] == "delete" {
+		return runProjectsDelete(args[1:])
+	}
+	return runProjectsList()
+}
+
+func runProjectsList() error {
 	cfg, err := brainconfig.Load()
 	if err != nil {
 		return err
@@ -694,26 +702,109 @@ func runProjects(_ []string) error {
 	}
 
 	fmt.Printf("Registered projects (%d):\n\n", len(cfg.Projects))
-	fmt.Printf("  %-20s  %-36s  %-28s  %s\n", "NAME", "ID", "EMBEDDER", "REPO")
-	fmt.Printf("  %-20s  %-36s  %-28s  %s\n",
+	fmt.Printf("  %-20s  %-36s  %-20s  %s\n", "NAME", "ID", "LAST INDEXED", "EMBEDDER")
+	fmt.Printf("  %-20s  %-36s  %-20s  %s\n",
 		"────────────────────", "────────────────────────────────────",
-		"────────────────────────────", "────────────────────────────")
+		"────────────────────", "────────────────────────────")
 
 	for name, project := range cfg.Projects {
-		repo := project.RepoPath
-		if repo == "" {
-			repo = "(not set)"
-		}
-		embedder := project.EmbedModel
-		if embedder == "" {
-			embedder = "(not set)"
+		embedModel := project.EmbedModel
+		if embedModel == "" {
+			embedModel = "(not set)"
 		}
 		id := project.ProjectID
 		if id == "" {
 			id = "(pending)"
 		}
-		fmt.Printf("  %-20s  %-36s  %-28s  %s\n", name, id, embedder, repo)
+
+		// Read last indexed date from local snapshot
+		lastIndexed := "(never)"
+		if id != "(pending)" {
+			snapshot, snapErr := indexer.LoadSnapshot(id)
+			if snapErr == nil && !snapshot.UpdatedAt.IsZero() {
+				lastIndexed = snapshot.UpdatedAt.Local().Format("2006-01-02 15:04")
+			}
+		}
+
+		fmt.Printf("  %-20s  %-36s  %-20s  %s\n", name, id, lastIndexed, embedModel)
 	}
+	fmt.Println()
+	return nil
+}
+
+func runProjectsDelete(args []string) error {
+	fs := flag.NewFlagSet("projects delete", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	projectName := fs.String("project", "", "project name to delete")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("parse flags: %w", err)
+	}
+	if strings.TrimSpace(*projectName) == "" {
+		return fmt.Errorf("--project is required")
+	}
+
+	cfg, err := brainconfig.Load()
+	if err != nil {
+		return err
+	}
+
+	project, ok := cfg.Projects[strings.TrimSpace(*projectName)]
+	if !ok {
+		return fmt.Errorf("project %q not found in local config", strings.TrimSpace(*projectName))
+	}
+
+	// 1. Try to delete from API (if admin has tenant token)
+	if strings.TrimSpace(cfg.TenantToken) != "" && strings.TrimSpace(cfg.APIEndpoint) != "" && strings.TrimSpace(project.ProjectID) != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodDelete,
+			cfg.APIEndpoint+"/api/projects/"+project.ProjectID, nil)
+		if err == nil {
+			req.Header.Set("Authorization", "Bearer "+cfg.TenantToken)
+			resp, apiErr := httpClient.Do(req)
+			if apiErr != nil {
+				fmt.Fprintf(os.Stderr, "  ⚠️  API unreachable — removed from local config only\n")
+			} else {
+				resp.Body.Close()
+				if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNoContent {
+					fmt.Printf("  ✅ Deleted from API\n")
+				} else if resp.StatusCode == http.StatusNotFound {
+					fmt.Printf("  ℹ️  Not found on API (already deleted or never synced)\n")
+				} else {
+					fmt.Fprintf(os.Stderr, "  ⚠️  API returned %s — removed from local config only\n", resp.Status)
+				}
+			}
+		}
+	}
+
+	// 2. Remove local snapshot
+	if strings.TrimSpace(project.ProjectID) != "" {
+		snapshotDir, _ := os.UserHomeDir()
+		if snapshotDir != "" {
+			snapshotFile := filepath.Join(snapshotDir, ".brain", "snapshots", project.ProjectID+".json")
+			if err := os.Remove(snapshotFile); err == nil {
+				fmt.Printf("  ✅ Local snapshot removed\n")
+			}
+		}
+
+		// Remove embedding cache
+		cacheDir, _ := os.UserHomeDir()
+		if cacheDir != "" {
+			embedCacheDir := filepath.Join(cacheDir, ".brain", "cache", project.ProjectID)
+			if err := os.RemoveAll(embedCacheDir); err == nil {
+				fmt.Printf("  ✅ Embedding cache removed\n")
+			}
+		}
+	}
+
+	// 3. Remove from local config
+	delete(cfg.Projects, strings.TrimSpace(*projectName))
+	if err := brainconfig.Save(cfg); err != nil {
+		return fmt.Errorf("save config: %w", err)
+	}
+
+	fmt.Printf("  ✅ Project %q removed from local config\n", strings.TrimSpace(*projectName))
 	fmt.Println()
 	return nil
 }
