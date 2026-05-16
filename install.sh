@@ -127,11 +127,11 @@ main() {
   echo "     brain index --project my-project"
   echo ""
   echo "  4. Configure your AI client:"
-  echo "     brain setup opencode     # OpenCode"
-  echo "     brain setup claude       # Claude Code"
-  echo "     brain setup cursor       # Cursor"
-  echo "     brain setup gemini       # Gemini CLI"
-  echo "     brain setup all          # All at once"
+  echo "     brain tui                # Interactive setup"
+  echo "     brain tui opencode       # OpenCode"
+  echo "     brain tui claude         # Claude Code"
+  echo "     brain tui cursor         # Cursor"
+  echo "     brain tui all            # All at once"
   echo ""
 }
 

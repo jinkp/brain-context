@@ -83,7 +83,9 @@ func main() {
 		err = runUpdate(os.Args[2:])
 	case "mcp":
 		err = runMCP(os.Args[2:])
-	case "setup":
+	case "tui":
+		err = runSetup(os.Args[2:])
+	case "setup": // backward compat alias for tui
 		err = runSetup(os.Args[2:])
 	case "tokens":
 		err = runTokens(os.Args[2:])
@@ -378,9 +380,9 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  brain tokens list    --project <name>")
 	fmt.Fprintln(os.Stderr, "  brain tokens renew   --project <name>")
 	fmt.Fprintln(os.Stderr, "  brain mcp            [--project <name>]")
-	fmt.Fprintln(os.Stderr, "  brain setup                     interactive TUI wizard (full onboarding)")
-	fmt.Fprintln(os.Stderr, "  brain setup clients             TUI — client selection only (for developers)")
-	fmt.Fprintln(os.Stderr, "  brain setup <client>            direct: opencode, claude, cursor, gemini, windsurf, all")
+	fmt.Fprintln(os.Stderr, "  brain tui                       interactive TUI (wizard, client setup, update)")
+	fmt.Fprintln(os.Stderr, "  brain tui clients               TUI — client selection only")
+	fmt.Fprintln(os.Stderr, "  brain tui <client>              direct: opencode, claude, cursor, gemini, windsurf, all")
 	fmt.Fprintln(os.Stderr, "  brain version")
 }
 
@@ -503,7 +505,8 @@ func runJoin(args []string) error {
 	fmt.Printf("  mcp_read_key: %s\n", resp.MCPReadKey[:min(30, len(resp.MCPReadKey))]+"...")
 	fmt.Println()
 	fmt.Println("  Next steps:")
-	fmt.Println("  brain setup opencode   # or claude, cursor, gemini, windsurf, all")
+	fmt.Println("  brain tui              # interactive setup, or:")
+	fmt.Println("  brain tui opencode     # or claude, cursor, gemini, windsurf, all")
 	fmt.Println("  → Restart your IDE and the MCP tools will appear")
 	fmt.Println()
 	fmt.Println("  ⚠️  Store your mcp_read_key — it is shown once.")
