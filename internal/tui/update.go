@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Gentleman-Programming/brain-context/internal/version"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -30,12 +31,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		switch m.screen {
+		case ScreenMenu:
+			return m.updateMenu(msg)
 		case ScreenConnect:
 			return m.updateConnect(msg)
 		case ScreenEmbedder:
 			return m.updateEmbedder(msg)
 		case ScreenClients:
 			return m.updateClients(msg)
+		case ScreenUpdating:
+			return m.updateUpdating(msg)
 		case ScreenDone:
 			return m.updateDone(msg)
 		}
@@ -65,6 +70,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clientResults = msg.results
 		m.screen = ScreenDone
 		return m, nil
+
+	case selfUpdateDoneMsg:
+		m.updating = false
+		if msg.err != nil {
+			m.updateErr = msg.err.Error()
+		} else {
+			m.updateErr = ""
+			m.latestVersion = msg.version
+			m.updateMsg = "Updated successfully! Restart brain to use the new version."
+			m.updateStatus = version.StatusUpToDate
+		}
+		return m, nil
 	}
 
 	// Forward input updates to active inputs
@@ -73,10 +90,66 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // ─── Per-screen key handlers ──────────────────────────────────────────────────
 
+func (m Model) updateMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c", "esc", "q":
+		return m, tea.Quit
+
+	case "up", "k":
+		m.menuCursor = max(0, m.menuCursor-1)
+	case "down", "j":
+		m.menuCursor = min(len(menuOptions)-1, m.menuCursor+1)
+
+	case "enter":
+		switch m.menuCursor {
+		case 0: // Full Wizard
+			m.screen = ScreenConnect
+			m.apiInput.Focus()
+			m.tokenInput.Blur()
+			return m, textinput.Blink
+		case 1: // Setup Clients
+			m.screen = ScreenClients
+			m.doneSource = ScreenClients
+			return m, nil
+		case 2: // Update
+			m.screen = ScreenUpdating
+			m.updating = true
+			m.updateErr = ""
+			return m, tea.Batch(m.spinner.Tick, doSelfUpdate())
+		}
+	}
+
+	return m, nil
+}
+
+func (m Model) updateUpdating(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "esc":
+		if !m.updating {
+			m.screen = ScreenMenu
+		}
+		return m, nil
+	case "enter":
+		if !m.updating {
+			if m.updateErr == "" {
+				return m, tea.Quit
+			}
+			m.screen = ScreenMenu
+		}
+		return m, nil
+	}
+	return m, nil
+}
+
 func (m Model) updateConnect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "ctrl+c", "esc":
+	case "ctrl+c":
 		return m, tea.Quit
+	case "esc":
+		m.screen = ScreenMenu
+		return m, nil
 
 	case "tab", "shift+tab", "down", "up":
 		if msg.String() == "tab" || msg.String() == "down" {
@@ -169,7 +242,12 @@ func (m Model) updateClients(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.clientsOnly {
 			return m, tea.Quit
 		}
-		m.screen = ScreenEmbedder
+		// If we came from menu → go back to menu, otherwise back to embedder (wizard)
+		if m.doneSource == ScreenClients {
+			m.screen = ScreenMenu
+		} else {
+			m.screen = ScreenEmbedder
+		}
 		return m, nil
 
 	case "up", "k":
@@ -298,6 +376,86 @@ func doSetupClients(brainExe string, clients []string) tea.Cmd {
 			results[c] = setupClient(c, home, brainExe)
 		}
 		return setupClientsDoneMsg{results: results}
+	}
+}
+
+func doSelfUpdate() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		// Get latest release from GitHub
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+			"https://api.github.com/repos/jinkp/brain-context/releases/latest", nil)
+		if err != nil {
+			return selfUpdateDoneMsg{err: fmt.Errorf("build request: %w", err)}
+		}
+		req.Header.Set("Accept", "application/json")
+
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return selfUpdateDoneMsg{err: fmt.Errorf("fetch latest release: %w", err)}
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != 200 {
+			return selfUpdateDoneMsg{err: fmt.Errorf("GitHub API returned %s", resp.Status)}
+		}
+
+		var release struct {
+			TagName string `json:"tag_name"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+			return selfUpdateDoneMsg{err: fmt.Errorf("decode release: %w", err)}
+		}
+		if release.TagName == "" {
+			return selfUpdateDoneMsg{err: fmt.Errorf("no release found")}
+		}
+
+		// Detect platform
+		platform := detectPlatform()
+		if platform == "" {
+			return selfUpdateDoneMsg{err: fmt.Errorf("unsupported platform")}
+		}
+
+		filename := "brain-" + platform
+		if strings.Contains(platform, "windows") {
+			filename += ".exe"
+		}
+		downloadURL := fmt.Sprintf("https://github.com/jinkp/brain-context/releases/download/%s/%s",
+			release.TagName, filename)
+
+		// Download
+		dlReq, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
+		if err != nil {
+			return selfUpdateDoneMsg{err: fmt.Errorf("build download request: %w", err)}
+		}
+		dlResp, err := httpClient.Do(dlReq)
+		if err != nil {
+			return selfUpdateDoneMsg{err: fmt.Errorf("download binary: %w", err)}
+		}
+		defer dlResp.Body.Close()
+
+		if dlResp.StatusCode != 200 {
+			return selfUpdateDoneMsg{err: fmt.Errorf("download failed: %s", dlResp.Status)}
+		}
+
+		binary, err := io.ReadAll(dlResp.Body)
+		if err != nil {
+			return selfUpdateDoneMsg{err: fmt.Errorf("read binary: %w", err)}
+		}
+
+		// Replace current executable
+		exe, err := selfExePath()
+		if err != nil {
+			return selfUpdateDoneMsg{err: fmt.Errorf("find executable: %w", err)}
+		}
+
+		if err := replaceBinary(exe, binary); err != nil {
+			return selfUpdateDoneMsg{err: err}
+		}
+
+		return selfUpdateDoneMsg{version: strings.TrimPrefix(release.TagName, "v")}
 	}
 }
 

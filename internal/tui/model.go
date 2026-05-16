@@ -21,13 +21,28 @@ import (
 type Screen int
 
 const (
-	ScreenConnect  Screen = iota // Step 1 — API URL + tenant token
-	ScreenEmbedder               // Step 2 — embedder provider + key
-	ScreenClients                // Step 3 — select AI clients
-	ScreenDone                   // Step 4 — summary + next steps
+	ScreenMenu     Screen = iota // Main menu — choose action
+	ScreenConnect                // Wizard Step 1 — API URL + tenant token
+	ScreenEmbedder               // Wizard Step 2 — embedder provider + key
+	ScreenClients                // Wizard Step 3 / standalone — select AI clients
+	ScreenUpdating               // Self-update in progress
+	ScreenDone                   // Summary + next steps
 )
 
-const totalSteps = 4
+const totalWizardSteps = 4
+
+// ─── Menu options ─────────────────────────────────────────────────────────────
+
+type menuOption struct {
+	label string
+	hint  string
+}
+
+var menuOptions = []menuOption{
+	{label: "Full Setup Wizard", hint: "Connect API → Embedder → Clients (first time)"},
+	{label: "Setup AI Clients", hint: "Configure OpenCode, Claude, Cursor, etc."},
+	{label: "Update brain-context", hint: "Download the latest version"},
+}
 
 // ─── Embedder options ─────────────────────────────────────────────────────────
 
@@ -68,6 +83,10 @@ type setupClientsDoneMsg struct {
 type updateCheckMsg struct {
 	result version.CheckResult
 }
+type selfUpdateDoneMsg struct {
+	err     error
+	version string
+}
 
 // ─── Model ───────────────────────────────────────────────────────────────────
 
@@ -79,11 +98,16 @@ type Model struct {
 	// navigation
 	screen Screen
 
+	// main menu
+	menuCursor int
+
 	// update check
-	updateStatus  version.CheckStatus
-	updateMsg     string
-	latestVersion string
+	updateStatus   version.CheckStatus
+	updateMsg      string
+	latestVersion  string
 	currentVersion string
+	updating       bool   // self-update in progress
+	updateErr      string // self-update error
 
 	// step 1 — connect
 	apiInput   textinput.Model
@@ -104,12 +128,13 @@ type Model struct {
 
 	// step 4 — done
 	clientResults map[string]error
+	doneSource    Screen // which flow reached ScreenDone (ScreenConnect=wizard, ScreenClients=clients-only)
 
 	// shared
 	brainExe    string
 	apiURL      string
 	token       string
-	clientsOnly bool // skip connect + embedder steps
+	clientsOnly bool // skip to clients (backward compat for brain setup clients)
 }
 
 // New creates a fresh setup wizard model.
@@ -142,12 +167,12 @@ func New(brainExe string, currentVersion string, clientsOnly ...bool) Model {
 		checked[i] = true
 	}
 
-	startScreen := ScreenConnect
-	if len(clientsOnly) > 0 && clientsOnly[0] {
+	// clientsOnly=true skips straight to clients (backward compat for brain setup clients)
+	startScreen := ScreenMenu
+	isClientsOnly := len(clientsOnly) > 0 && clientsOnly[0]
+	if isClientsOnly {
 		startScreen = ScreenClients
 	}
-
-	isClientsOnly := len(clientsOnly) > 0 && clientsOnly[0]
 
 	return Model{
 		screen:         startScreen,

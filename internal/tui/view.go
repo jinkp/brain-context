@@ -27,32 +27,32 @@ func (m Model) View() string {
 	b.WriteString(logoStyle.Render(logo))
 	b.WriteString("\n")
 
-	// Update available banner
-	if m.updateStatus == version.StatusUpdateAvailable {
-		banner := fmt.Sprintf("  🆕 Update available: v%s → v%s\n  %s",
-			m.currentVersion, m.latestVersion, m.updateMsg)
-		b.WriteString(lipgloss.NewStyle().
-			Foreground(colorYellow).
-			Bold(true).
-			BorderStyle(lipgloss.NormalBorder()).
-			BorderForeground(colorYellow).
-			Padding(0, 1).
-			MarginBottom(1).
-			Render(banner))
-		b.WriteString("\n")
-	}
-
-	b.WriteString(renderStepBar(int(m.screen)))
-	b.WriteString("\n\n")
-
 	switch m.screen {
-	case ScreenConnect:
-		b.WriteString(m.viewConnect())
-	case ScreenEmbedder:
-		b.WriteString(m.viewEmbedder())
+	case ScreenMenu:
+		b.WriteString(m.viewMenu())
+	case ScreenConnect, ScreenEmbedder:
+		// Wizard steps get the step bar
+		b.WriteString(renderStepBar(m.screen))
+		b.WriteString("\n\n")
+		if m.screen == ScreenConnect {
+			b.WriteString(m.viewConnect())
+		} else {
+			b.WriteString(m.viewEmbedder())
+		}
 	case ScreenClients:
+		if m.doneSource != ScreenClients {
+			// Inside wizard flow
+			b.WriteString(renderStepBar(m.screen))
+			b.WriteString("\n\n")
+		}
 		b.WriteString(m.viewClients())
+	case ScreenUpdating:
+		b.WriteString(m.viewUpdating())
 	case ScreenDone:
+		if m.doneSource != ScreenClients {
+			b.WriteString(renderStepBar(m.screen))
+			b.WriteString("\n\n")
+		}
 		b.WriteString(m.viewDone())
 	}
 
@@ -61,8 +61,16 @@ func (m Model) View() string {
 
 // ─── Step bar ─────────────────────────────────────────────────────────────────
 
-func renderStepBar(current int) string {
+func renderStepBar(screen Screen) string {
 	steps := []string{"Connect", "Embedder", "Clients", "Done"}
+	// Map screen to wizard step index (ScreenConnect=0, ScreenEmbedder=1, etc.)
+	stepMap := map[Screen]int{
+		ScreenConnect:  0,
+		ScreenEmbedder: 1,
+		ScreenClients:  2,
+		ScreenDone:     3,
+	}
+	current := stepMap[screen]
 	parts := make([]string, len(steps))
 	for i, s := range steps {
 		if i == current {
@@ -74,6 +82,71 @@ func renderStepBar(current int) string {
 		}
 	}
 	return strings.Join(parts, dimStyle.Render("  ──  "))
+}
+
+// ─── Main Menu ────────────────────────────────────────────────────────────────
+
+func (m Model) viewMenu() string {
+	var b strings.Builder
+
+	b.WriteString(headerStyle.Render("What would you like to do?"))
+	b.WriteString("\n\n")
+
+	for i, opt := range menuOptions {
+		cursor := "  "
+		if i == m.menuCursor {
+			cursor = selectedStyle.Render("> ")
+		}
+
+		label := normalStyle.Render(opt.label)
+		if i == m.menuCursor {
+			label = selectedStyle.Render(opt.label)
+		}
+
+		hint := dimStyle.Render(opt.hint)
+		b.WriteString(fmt.Sprintf("%s%s\n", cursor, label))
+		b.WriteString(fmt.Sprintf("    %s\n\n", hint))
+	}
+
+	// Show update badge if available
+	if m.updateStatus == version.StatusUpdateAvailable {
+		badge := fmt.Sprintf("  v%s available", m.latestVersion)
+		b.WriteString(lipgloss.NewStyle().
+			Foreground(colorYellow).
+			Bold(true).
+			Render(badge))
+		b.WriteString("\n\n")
+	}
+
+	b.WriteString(helpStyle.Render("j/k navigate  •  Enter select  •  q quit"))
+
+	return b.String()
+}
+
+// ─── Updating ─────────────────────────────────────────────────────────────────
+
+func (m Model) viewUpdating() string {
+	var b strings.Builder
+
+	b.WriteString(headerStyle.Render("Self-Update"))
+	b.WriteString("\n\n")
+
+	if m.updating {
+		b.WriteString(m.spinner.View())
+		b.WriteString(dimStyle.Render("  Downloading latest version..."))
+	} else if m.updateErr != "" {
+		b.WriteString(errorStyle.Render("  Update failed: " + m.updateErr))
+		b.WriteString("\n\n")
+		b.WriteString(helpStyle.Render("Enter back to menu  •  Esc back"))
+	} else {
+		b.WriteString(successStyle.Render("  Updated successfully!"))
+		b.WriteString("\n\n")
+		b.WriteString(dimStyle.Render("  Restart brain to use the new version."))
+		b.WriteString("\n\n")
+		b.WriteString(helpStyle.Render("Enter to exit"))
+	}
+
+	return b.String()
 }
 
 // ─── Step 1: Connect ──────────────────────────────────────────────────────────
