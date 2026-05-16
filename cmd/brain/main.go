@@ -83,6 +83,8 @@ func main() {
 		err = runUpdate(os.Args[2:])
 	case "mcp":
 		err = runMCP(os.Args[2:])
+	case "projects":
+		err = runProjects(os.Args[2:])
 	case "tui":
 		err = runSetup(os.Args[2:])
 	case "setup": // backward compat alias for tui
@@ -379,6 +381,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  brain join           --code <brn_invite_xxx>  [--api http://localhost:8080]")
 	fmt.Fprintln(os.Stderr, "  brain tokens list    --project <name>")
 	fmt.Fprintln(os.Stderr, "  brain tokens renew   --project <name>")
+	fmt.Fprintln(os.Stderr, "  brain projects                  list registered projects")
 	fmt.Fprintln(os.Stderr, "  brain mcp            [--project <name>]")
 	fmt.Fprintln(os.Stderr, "  brain tui                       interactive TUI (wizard, client setup, update)")
 	fmt.Fprintln(os.Stderr, "  brain tui clients               TUI — client selection only")
@@ -675,6 +678,44 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// ── projects ─────────────────────────────────────────────────────────────────
+
+func runProjects(_ []string) error {
+	cfg, err := brainconfig.Load()
+	if err != nil {
+		return err
+	}
+
+	if len(cfg.Projects) == 0 {
+		fmt.Println("No projects registered. Run `brain register` to add one.")
+		return nil
+	}
+
+	fmt.Printf("Registered projects (%d):\n\n", len(cfg.Projects))
+	fmt.Printf("  %-20s  %-36s  %-28s  %s\n", "NAME", "ID", "EMBEDDER", "REPO")
+	fmt.Printf("  %-20s  %-36s  %-28s  %s\n",
+		"────────────────────", "────────────────────────────────────",
+		"────────────────────────────", "────────────────────────────")
+
+	for name, project := range cfg.Projects {
+		repo := project.RepoPath
+		if repo == "" {
+			repo = "(not set)"
+		}
+		embedder := project.EmbedModel
+		if embedder == "" {
+			embedder = "(not set)"
+		}
+		id := project.ProjectID
+		if id == "" {
+			id = "(pending)"
+		}
+		fmt.Printf("  %-20s  %-36s  %-28s  %s\n", name, id, embedder, repo)
+	}
+	fmt.Println()
+	return nil
 }
 
 // ── setup ────────────────────────────────────────────────────────────────────
