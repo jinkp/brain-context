@@ -383,6 +383,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  brain tokens renew   --project <name>")
 	fmt.Fprintln(os.Stderr, "  brain projects                  list registered projects")
 	fmt.Fprintln(os.Stderr, "  brain projects delete --project <name>  remove a project")
+	fmt.Fprintln(os.Stderr, "  brain projects rename --project <old> --name <new>  rename a project")
 	fmt.Fprintln(os.Stderr, "  brain mcp            [--project <name>]")
 	fmt.Fprintln(os.Stderr, "  brain tui                       interactive TUI (wizard, client setup, update)")
 	fmt.Fprintln(os.Stderr, "  brain tui clients               TUI — client selection only")
@@ -684,8 +685,13 @@ func min(a, b int) int {
 // ── projects ─────────────────────────────────────────────────────────────────
 
 func runProjects(args []string) error {
-	if len(args) > 0 && args[0] == "delete" {
-		return runProjectsDelete(args[1:])
+	if len(args) > 0 {
+		switch args[0] {
+		case "delete":
+			return runProjectsDelete(args[1:])
+		case "rename":
+			return runProjectsRename(args[1:])
+		}
 	}
 	return runProjectsList()
 }
@@ -806,6 +812,68 @@ func runProjectsDelete(args []string) error {
 
 	fmt.Printf("  ✅ Project %q removed from local config\n", strings.TrimSpace(*projectName))
 	fmt.Println()
+	return nil
+}
+
+func runProjectsRename(args []string) error {
+	fs := flag.NewFlagSet("projects rename", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	projectName := fs.String("project", "", "current project name")
+	newName := fs.String("name", "", "new project name")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("parse flags: %w", err)
+	}
+	if strings.TrimSpace(*projectName) == "" {
+		return fmt.Errorf("--project is required")
+	}
+	if strings.TrimSpace(*newName) == "" {
+		return fmt.Errorf("--name is required")
+	}
+
+	cfg, err := brainconfig.Load()
+	if err != nil {
+		return err
+	}
+
+	project, ok := cfg.Projects[strings.TrimSpace(*projectName)]
+	if !ok {
+		return fmt.Errorf("project %q not found in local config", strings.TrimSpace(*projectName))
+	}
+
+	// 1. Rename on API (if admin)
+	if strings.TrimSpace(cfg.TenantToken) != "" && strings.TrimSpace(cfg.APIEndpoint) != "" && strings.TrimSpace(project.ProjectID) != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		body, _ := json.Marshal(map[string]string{"name": strings.TrimSpace(*newName)})
+		req, err := http.NewRequestWithContext(ctx, http.MethodPatch,
+			cfg.APIEndpoint+"/api/projects/"+project.ProjectID+"/rename",
+			bytes.NewReader(body))
+		if err == nil {
+			req.Header.Set("Authorization", "Bearer "+cfg.TenantToken)
+			req.Header.Set("Content-Type", "application/json")
+			resp, apiErr := httpClient.Do(req)
+			if apiErr != nil {
+				fmt.Fprintf(os.Stderr, "  ⚠️  API unreachable — renamed locally only\n")
+			} else {
+				resp.Body.Close()
+				if resp.StatusCode == http.StatusOK {
+					fmt.Printf("  ✅ Renamed on API\n")
+				} else {
+					fmt.Fprintf(os.Stderr, "  ⚠️  API returned %s — renamed locally only\n", resp.Status)
+				}
+			}
+		}
+	}
+
+	// 2. Rename in local config
+	delete(cfg.Projects, strings.TrimSpace(*projectName))
+	cfg.Projects[strings.TrimSpace(*newName)] = project
+	if err := brainconfig.Save(cfg); err != nil {
+		return fmt.Errorf("save config: %w", err)
+	}
+
+	fmt.Printf("  ✅ %q → %q\n\n", strings.TrimSpace(*projectName), strings.TrimSpace(*newName))
 	return nil
 }
 

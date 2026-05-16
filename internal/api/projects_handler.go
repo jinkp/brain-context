@@ -139,6 +139,34 @@ func (h *Handler) UpdateEmbedKey(c echo.Context) error {
 	})
 }
 
+func (h *Handler) RenameProject(c echo.Context) error {
+	tenantID, ok := tenantIDFromContext(c)
+	if !ok {
+		return writeError(c, http.StatusUnauthorized, "UNAUTHORIZED", "missing tenant context")
+	}
+
+	projectID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return writeError(c, http.StatusBadRequest, "VALIDATION_ERROR", "invalid project id")
+	}
+
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := c.Bind(&req); err != nil || strings.TrimSpace(req.Name) == "" {
+		return writeError(c, http.StatusBadRequest, "VALIDATION_ERROR", "name is required")
+	}
+
+	if err := h.store.RenameProject(c.Request().Context(), tenantID, projectID, strings.TrimSpace(req.Name)); err != nil {
+		return handleStoreError(c, err)
+	}
+
+	return c.JSON(http.StatusOK, map[string]any{
+		"message": "project renamed successfully",
+		"name":    strings.TrimSpace(req.Name),
+	})
+}
+
 func (h *Handler) DeleteProject(c echo.Context) error {
 	tenantID, ok := tenantIDFromContext(c)
 	if !ok {

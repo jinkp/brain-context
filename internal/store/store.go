@@ -308,6 +308,21 @@ func (s *Store) CreateProject(ctx context.Context, tenantID uuid.UUID, params Cr
 	return project, nil
 }
 
+func (s *Store) RenameProject(ctx context.Context, tenantID, projectID uuid.UUID, newName string) error {
+	tag, err := s.Executor(ctx).Exec(ctx, `
+		UPDATE projects
+		SET name = $3
+		WHERE id = $1 AND tenant_id = $2
+	`, projectID, tenantID, newName)
+	if err != nil {
+		return fmt.Errorf("rename project: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *Store) DeleteProject(ctx context.Context, tenantID, projectID uuid.UUID) error {
 	// CASCADE deletes project_files, chunks, vectors, index_jobs, api_keys via FK
 	tag, err := s.Executor(ctx).Exec(ctx, `
