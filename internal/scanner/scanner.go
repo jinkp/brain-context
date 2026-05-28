@@ -18,12 +18,26 @@ type ScannedFile struct {
 }
 
 // ScanOptions controls which files the scanner processes.
+//
+// Exclusion/inclusion sources are merged in this priority order (all additive):
+//
+//  1. Hardcoded ignores (always applied, not overridable)
+//  2. Global config exclude/include (from ~/.brain/config.yaml top-level)
+//  3. Per-project config exclude/include (from ~/.brain/config.yaml per project)
+//  4. .brainignore file (from repo root)
+//  5. CLI flags --exclude / --include (passed in Exclude / Include fields)
 type ScanOptions struct {
 	Stack      string   // predefined stack filter (go, dotnet, react, python, java, rust)
-	Include    []string // extra extensions to include (e.g. ".proto", ".graphql")
-	Exclude    []string // directories to exclude (e.g. "assets/", "Migrations/")
+	Include    []string // extra extensions from CLI flags (e.g. ".proto", ".graphql")
+	Exclude    []string // directories from CLI flags (e.g. "assets/", "Migrations/")
 	Verbose    bool     // print each file as it's scanned
 	OnFile     func(path string) // callback for progress reporting
+
+	// Config-sourced options (set by the caller from config.Config)
+	GlobalExclude  []string // global dirs from ~/.brain/config.yaml
+	GlobalInclude  []string // global extensions from ~/.brain/config.yaml
+	ProjectExclude []string // per-project dirs from ~/.brain/config.yaml
+	ProjectInclude []string // per-project extensions from ~/.brain/config.yaml
 }
 
 // ── Stacks ────────────────────────────────────────────────────────────────────
@@ -136,11 +150,17 @@ func Scan(root string, opts ...ScanOptions) ([]ScannedFile, error) {
 		return nil, fmt.Errorf("resolve scan root: %w", err)
 	}
 
-	// Build allowed extensions set from stack + includes
-	allowedExts := buildAllowedExtensions(opt)
+	// Load .brainignore from repo root (no error if missing)
+	bi, err := LoadBrainIgnore(absRoot)
+	if err != nil {
+		return nil, fmt.Errorf("load .brainignore: %w", err)
+	}
 
-	// Build extra excluded dirs
-	excludedDirs := buildExcludedDirs(opt)
+	// Build allowed extensions set from stack + all include sources
+	allowedExts := buildAllowedExtensions(opt, bi)
+
+	// Build extra excluded dirs from all exclude sources
+	excludedDirs := buildExcludedDirs(opt, bi)
 
 	files := make([]ScannedFile, 0)
 	err = filepath.WalkDir(absRoot, func(path string, entry fs.DirEntry, walkErr error) error {
@@ -224,8 +244,15 @@ func Scan(root string, opts ...ScanOptions) ([]ScannedFile, error) {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-func buildAllowedExtensions(opt ScanOptions) map[string]bool {
-	if opt.Stack == "" && len(opt.Include) == 0 {
+func buildAllowedExtensions(opt ScanOptions, bi BrainIgnore) map[string]bool {
+	// Merge all include sources: global config + per-project config + .brainignore + CLI flags
+	allIncludes := make([]string, 0, len(opt.GlobalInclude)+len(opt.ProjectInclude)+len(bi.IncludeExts)+len(opt.Include))
+	allIncludes = append(allIncludes, opt.GlobalInclude...)
+	allIncludes = append(allIncludes, opt.ProjectInclude...)
+	allIncludes = append(allIncludes, bi.IncludeExts...)
+	allIncludes = append(allIncludes, opt.Include...)
+
+	if opt.Stack == "" && len(allIncludes) == 0 {
 		return nil // no filter — scan everything
 	}
 
@@ -238,8 +265,8 @@ func buildAllowedExtensions(opt ScanOptions) map[string]bool {
 		}
 	}
 
-	// Add extra includes
-	for _, ext := range opt.Include {
+	// Add extra includes from all sources
+	for _, ext := range allIncludes {
 		ext = strings.TrimSpace(ext)
 		if ext == "" {
 			continue
@@ -253,12 +280,19 @@ func buildAllowedExtensions(opt ScanOptions) map[string]bool {
 	return allowed
 }
 
-func buildExcludedDirs(opt ScanOptions) map[string]bool {
-	if len(opt.Exclude) == 0 {
+func buildExcludedDirs(opt ScanOptions, bi BrainIgnore) map[string]bool {
+	// Merge all exclude sources: global config + per-project config + .brainignore + CLI flags
+	allExcludes := make([]string, 0, len(opt.GlobalExclude)+len(opt.ProjectExclude)+len(bi.ExcludeDirs)+len(opt.Exclude))
+	allExcludes = append(allExcludes, opt.GlobalExclude...)
+	allExcludes = append(allExcludes, opt.ProjectExclude...)
+	allExcludes = append(allExcludes, bi.ExcludeDirs...)
+	allExcludes = append(allExcludes, opt.Exclude...)
+
+	if len(allExcludes) == 0 {
 		return nil
 	}
-	dirs := make(map[string]bool, len(opt.Exclude))
-	for _, d := range opt.Exclude {
+	dirs := make(map[string]bool, len(allExcludes))
+	for _, d := range allExcludes {
 		d = strings.TrimSpace(d)
 		d = strings.TrimSuffix(d, "/")
 		d = strings.TrimSuffix(d, "\\")
@@ -282,8 +316,18 @@ func shouldIgnoreDir(name string) bool {
 	return ignored
 }
 
+// ignoredFiles are specific filenames that should always be skipped.
+var ignoredFiles = map[string]struct{}{
+	".brainignore": {},
+	".gitignore":   {},
+	".dockerignore": {},
+}
+
 func shouldIgnoreFile(name string) bool {
 	lowerName := strings.ToLower(strings.TrimSpace(name))
+	if _, ok := ignoredFiles[lowerName]; ok {
+		return true
+	}
 	for _, suffix := range ignoredSuffixes {
 		if strings.HasSuffix(lowerName, suffix) {
 			return true

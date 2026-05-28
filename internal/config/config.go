@@ -19,18 +19,22 @@ var allowedDimensions = map[int]struct{}{
 type Config struct {
 	APIEndpoint string                   `yaml:"api_endpoint"`
 	TenantToken string                   `yaml:"tenant_token"`
+	Exclude     []string                 `yaml:"exclude,omitempty"` // global dirs to exclude from all projects
+	Include     []string                 `yaml:"include,omitempty"` // global extra extensions for all projects
 	Projects    map[string]ProjectConfig `yaml:"projects"`
 }
 
 type ProjectConfig struct {
-	ProjectID       string `yaml:"project_id"`
-	ProjectToken    string `yaml:"project_token"`
-	MCPReadKey      string `yaml:"mcp_read_key"`
-	RepoPath        string `yaml:"repo_path"`
-	EmbedModel      string `yaml:"embed_model"`
-	EmbedAPIKey     string `yaml:"embed_api_key"`      // plaintext — only set by admin locally
-	EmbedAPIKeyEnc  string `yaml:"embed_api_key_enc"`  // AES-256-GCM encrypted — set via brain join
-	EmbedDimensions int    `yaml:"embed_dimensions"`
+	ProjectID       string   `yaml:"project_id"`
+	ProjectToken    string   `yaml:"project_token"`
+	MCPReadKey      string   `yaml:"mcp_read_key"`
+	RepoPath        string   `yaml:"repo_path"`
+	EmbedModel      string   `yaml:"embed_model"`
+	EmbedAPIKey     string   `yaml:"embed_api_key"`      // plaintext — only set by admin locally
+	EmbedAPIKeyEnc  string   `yaml:"embed_api_key_enc"`  // AES-256-GCM encrypted — set via brain join
+	EmbedDimensions int      `yaml:"embed_dimensions"`
+	Exclude         []string `yaml:"exclude,omitempty"` // per-project dirs to exclude
+	Include         []string `yaml:"include,omitempty"` // per-project extra extensions to include
 }
 
 func Path() (string, error) {

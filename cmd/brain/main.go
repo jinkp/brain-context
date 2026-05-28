@@ -1018,10 +1018,18 @@ func runIndexCommand(args []string, incremental bool) error {
 		}
 	}
 
-	// Build scan options from flags
+	// Build scan options from all sources:
+	// 1. Global config exclude/include
+	// 2. Per-project config exclude/include
+	// 3. .brainignore (loaded automatically by scanner)
+	// 4. CLI flags --exclude / --include
 	scanOpts := scanner.ScanOptions{
-		Stack:   strings.TrimSpace(*stack),
-		Verbose: *verbose,
+		Stack:          strings.TrimSpace(*stack),
+		Verbose:        *verbose,
+		GlobalExclude:  cfg.Exclude,
+		GlobalInclude:  cfg.Include,
+		ProjectExclude: project.Exclude,
+		ProjectInclude: project.Include,
 	}
 	if *include != "" {
 		for _, ext := range strings.Split(*include, ",") {

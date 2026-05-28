@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/Gentleman-Programming/brain-context/internal/config"
 )
 
 // setupClient configures the MCP entry for the given client.
@@ -117,6 +119,7 @@ func setupClaude(home, brainExe string) error {
 // ── Cursor ────────────────────────────────────────────────────────────────────
 
 func setupCursor(home, brainExe string) error {
+	// 1. Inject MCP entry into mcp.json
 	candidates := []string{
 		filepath.Join(home, ".cursor", "mcp.json"),
 		filepath.Join(home, "Library", "Application Support", "Cursor", "mcp.json"),
@@ -127,19 +130,42 @@ func setupCursor(home, brainExe string) error {
 		path = candidates[0]
 	}
 
-	cfg, err := readJSONMap(path)
+	mcpCfg, err := readJSONMap(path)
 	if err != nil {
-		cfg = map[string]any{}
+		mcpCfg = map[string]any{}
 	}
 
-	mcpServers := getOrCreateMap(cfg, "mcpServers")
+	mcpServers := getOrCreateMap(mcpCfg, "mcpServers")
 	mcpServers["brain-context"] = map[string]any{
 		"command": brainExe,
 		"args":    []string{"mcp"},
 	}
-	cfg["mcpServers"] = mcpServers
+	mcpCfg["mcpServers"] = mcpServers
 
-	return writeJSONMap(path, cfg)
+	if err := writeJSONMap(path, mcpCfg); err != nil {
+		return err
+	}
+
+	// 2. Inject protocol into .cursor/rules/brain-context.md for each registered project
+	brainCfg, err := config.Load()
+	if err != nil {
+		// Config not available — skip protocol injection, MCP is already registered
+		return nil
+	}
+	for _, proj := range brainCfg.Projects {
+		repoPath := strings.TrimSpace(proj.RepoPath)
+		if repoPath == "" {
+			continue
+		}
+		rulesDir := filepath.Join(repoPath, ".cursor", "rules")
+		rulesFile := filepath.Join(rulesDir, "brain-context.md")
+		if err := injectProtocolIntoFile(rulesFile); err != nil {
+			// Log but don't fail — MCP setup succeeded, protocol is best-effort
+			fmt.Fprintf(os.Stderr, "  ⚠️  cursor rules injection skipped for %s: %v\n", repoPath, err)
+		}
+	}
+
+	return nil
 }
 
 // ── Gemini CLI ────────────────────────────────────────────────────────────────
