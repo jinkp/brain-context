@@ -213,6 +213,8 @@ func runRegister(args []string) error {
 		return err
 	}
 
+	// Preserve existing per-project exclude/include when re-registering.
+	existing := cfg.Projects[strings.TrimSpace(*projectName)]
 	cfg.Projects[strings.TrimSpace(*projectName)] = brainconfig.ProjectConfig{
 		ProjectID:       project.ID,
 		ProjectToken:    tokens.ProjectToken.Token,
@@ -221,6 +223,8 @@ func runRegister(args []string) error {
 		EmbedModel:      fullModel,
 		EmbedAPIKey:     strings.TrimSpace(*apiKey),
 		EmbedDimensions: emb.Dimensions(),
+		Exclude:         existing.Exclude,
+		Include:         existing.Include,
 	}
 	if err := brainconfig.Save(cfg); err != nil {
 		return err
