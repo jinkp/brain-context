@@ -50,13 +50,13 @@
 Linux/macOS:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<your-org>/brain-context/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/jinkp/brain-context/master/install.sh | bash
 ```
 
 Windows PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/<your-org>/brain-context/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/jinkp/brain-context/master/install.ps1 | iex
 ```
 
 ### 2. 🔐 Login to your tenant
@@ -94,9 +94,20 @@ Direct setup mode:
 
 ```bash
 brain setup opencode
-# or
+brain setup cursor
+brain setup claude
 brain setup all
 ```
+
+Each client setup registers the MCP server and, where supported, injects a protocol file so the AI agent uses brain-context tools proactively:
+
+| Client | MCP Config | Protocol File |
+|---|---|---|
+| OpenCode | `~/.config/opencode/opencode.json` | `AGENTS.md` |
+| Claude Code | `~/.claude/settings.json` | `~/.claude/CLAUDE.md` |
+| Cursor | `~/.cursor/mcp.json` | `.cursor/rules/brain-context.md` (per registered project) |
+| Gemini CLI | `~/.gemini/settings.json` | -- |
+| Windsurf | `~/.codeium/windsurf/mcp_config.json` | -- |
 
 ## CLI Reference
 
@@ -104,12 +115,77 @@ brain setup all
 |---|---|
 | `brain login --token <tenant-api-key> [--api http://localhost:8080]` | Authenticate the CLI against a tenant API. |
 | `brain register --project <name> --repo <path> --embedder <gemini\|openai\|ollama> --api-key <key> --model <model>` | Register a repository and embedder configuration. |
-| `brain index --project <name>` | Run the initial project indexing flow. |
-| `brain update --project <name>` | Re-index incrementally using the 3-level hash diff pipeline. |
+| `brain index --project <name> [--stack <stack>] [--exclude <dirs>] [--include <exts>] [--verbose]` | Run the initial project indexing flow. |
+| `brain update --project <name> [--stack <stack>] [--exclude <dirs>] [--include <exts>] [--verbose]` | Re-index incrementally using the 3-level hash diff pipeline. |
+| `brain projects` | List all registered projects with status and last indexed date. |
+| `brain projects delete --project <name>` | Delete a registered project. |
+| `brain projects rename --project <name> --new-name <new>` | Rename a registered project. |
 | `brain setup` | Launch the Bubbletea onboarding wizard with Catppuccin Mocha styling. |
 | `brain setup <client>` | Configure a specific client: `opencode`, `claude`, `cursor`, `gemini`, `windsurf`, or `all`. |
 | `brain mcp [--project <name>]` | Run the embedded MCP server, optionally pinned to one project. |
 | `brain version` | Print the installed CLI version. |
+
+## Filtering: Exclude and Include
+
+brain-context supports multiple sources for controlling which files and directories are indexed.
+All sources are **additive** (union) and evaluated in this order:
+
+1. **Hardcoded ignores** (always applied, not overridable): `node_modules`, `.git`, `dist`, `build`, `vendor`, binaries, images, lock files, etc.
+2. **Global config** (`~/.brain/config.yaml` top-level): applies to all projects.
+3. **Per-project config** (`~/.brain/config.yaml` per project): applies to one project.
+4. **`.brainignore`** file in the repository root: version-controlled, per-repo.
+5. **CLI flags** `--exclude` / `--include`: one-time override for a specific run.
+
+### .brainignore
+
+Place a `.brainignore` file at the root of your repository. Lines outside any section header default to `[exclude]`.
+
+```text
+# Directories to exclude (default section)
+assets
+Migrations/
+docs
+generated
+
+[include]
+# Extra file extensions to include when using --stack
+.proto
+.graphql
+```
+
+### Config-based exclude/include
+
+Add `exclude` and `include` to `~/.brain/config.yaml` at the global or per-project level:
+
+```yaml
+api_endpoint: https://api.brain-context.dev
+tenant_token: brn_tenant_xxx
+
+# Global — applies to ALL projects
+exclude:
+  - Migrations
+  - assets
+include:
+  - ".proto"
+
+projects:
+  my-repo:
+    project_id: "..."
+    repo_path: "/path/to/my-repo"
+    # Per-project — applies only to this project
+    exclude:
+      - Tests
+    include:
+      - ".graphql"
+```
+
+### CLI flags
+
+Override for a single run without changing any config file:
+
+```bash
+brain index --project my-repo --exclude "assets,Migrations" --include ".proto,.graphql"
+```
 
 ## MCP Tools
 
@@ -217,6 +293,9 @@ This gives a simple operational model: run the stateless Go API in Compute Engin
   - `brn_proj_xxx` — project upload/write only
   - `brn_mcp_xxx` — MCP read only
 - All tokens expire after 90 days and must be renewed manually.
+- Public API endpoints (register, login, invite redeem) are rate-limited.
+- Install scripts verify SHA256 checksums before installing binaries.
+- Tenant self-registration can be disabled via `BRAIN_REGISTRATION=closed`.
 
 ## Agent Instructions (IMPORTANT)
 
