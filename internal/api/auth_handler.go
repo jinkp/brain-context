@@ -1,13 +1,21 @@
 package api
 
 import (
+	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/Gentleman-Programming/brain-context/internal/auth"
 	"github.com/labstack/echo/v4"
 )
+
+// registrationOpen returns true if tenant self-registration is allowed.
+// Controlled by BRAIN_REGISTRATION env var: "open" (default) or "closed".
+func registrationOpen() bool {
+	return strings.ToLower(strings.TrimSpace(os.Getenv("BRAIN_REGISTRATION"))) != "closed"
+}
 
 type registerTenantRequest struct {
 	Name string `json:"name"`
@@ -26,6 +34,11 @@ type tokenPayload struct {
 }
 
 func (h *Handler) RegisterTenant(c echo.Context) error {
+	if !registrationOpen() {
+		return writeError(c, http.StatusForbidden, "REGISTRATION_CLOSED",
+			"tenant registration is currently closed — contact your admin")
+	}
+
 	var req registerTenantRequest
 	if err := c.Bind(&req); err != nil {
 		return writeError(c, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
@@ -42,8 +55,11 @@ func (h *Handler) RegisterTenant(c echo.Context) error {
 
 	tenant, record, err := h.store.CreateTenantWithAPIKey(c.Request().Context(), req.Name, issued)
 	if err != nil {
+		log.Printf("[AUDIT] tenant register FAILED | ip=%s name=%q err=%v", c.RealIP(), req.Name, err)
 		return handleStoreError(c, err)
 	}
+
+	log.Printf("[AUDIT] tenant register OK | ip=%s name=%q tenant_id=%s", c.RealIP(), req.Name, tenant.ID)
 
 	return c.JSON(http.StatusCreated, map[string]any{
 		"tenant": tenant,

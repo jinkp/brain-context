@@ -8,7 +8,7 @@ import (
 )
 
 // GetMetrics returns usage analytics for the authenticated tenant.
-// GET /api/admin/metrics?from=2026-01-01&to=2026-12-31
+// GET /api/metrics?from=2026-01-01&to=2026-12-31
 func (h *Handler) GetMetrics(c echo.Context) error {
 	tenantID, ok := tenantIDFromContext(c)
 	if !ok {

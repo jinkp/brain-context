@@ -1,6 +1,10 @@
 #!/bin/bash
 # brain-context installer for Linux and macOS
 # Usage: curl -fsSL https://raw.githubusercontent.com/jinkp/brain-context/master/install.sh | bash
+#
+# Security: downloads SHA256 checksums from the release and verifies the
+# binary before installing.  Set BRAIN_SKIP_CHECKSUM=1 to bypass (not
+# recommended).
 
 set -e
 
@@ -58,11 +62,13 @@ get_latest_version() {
   fi
 }
 
-# ── Download binary ───────────────────────────────────────────────────────────
+# ── Download and verify binary ─────────────────────────────────────────────────
 download_binary() {
   FILENAME="${BINARY_NAME}-${PLATFORM}"
   URL="https://github.com/${REPO}/releases/download/${VERSION}/${FILENAME}"
+  CHECKSUMS_URL="https://github.com/${REPO}/releases/download/${VERSION}/checksums.txt"
   TMP_FILE="$(mktemp)"
+  TMP_CHECKSUMS="$(mktemp)"
 
   info "Downloading brain-context ${VERSION} for ${PLATFORM}..."
 
@@ -70,6 +76,49 @@ download_binary() {
     curl -fsSL "$URL" -o "$TMP_FILE" || error "Download failed: $URL"
   else
     wget -qO "$TMP_FILE" "$URL" || error "Download failed: $URL"
+  fi
+
+  # ── SHA256 verification ─────────────────────────────────────────────────
+  if [ "${BRAIN_SKIP_CHECKSUM:-0}" = "1" ]; then
+    warn "Checksum verification skipped (BRAIN_SKIP_CHECKSUM=1)"
+  else
+    info "Verifying SHA256 checksum..."
+    CHECKSUMS_OK=true
+
+    if command -v curl &>/dev/null; then
+      curl -fsSL "$CHECKSUMS_URL" -o "$TMP_CHECKSUMS" 2>/dev/null || CHECKSUMS_OK=false
+    else
+      wget -qO "$TMP_CHECKSUMS" "$CHECKSUMS_URL" 2>/dev/null || CHECKSUMS_OK=false
+    fi
+
+    if [ "$CHECKSUMS_OK" = true ] && [ -s "$TMP_CHECKSUMS" ]; then
+      EXPECTED_HASH=$(grep "${FILENAME}" "$TMP_CHECKSUMS" | awk '{print $1}')
+      if [ -z "$EXPECTED_HASH" ]; then
+        warn "Checksum entry not found for ${FILENAME} — skipping verification"
+      else
+        if command -v sha256sum &>/dev/null; then
+          ACTUAL_HASH=$(sha256sum "$TMP_FILE" | awk '{print $1}')
+        elif command -v shasum &>/dev/null; then
+          ACTUAL_HASH=$(shasum -a 256 "$TMP_FILE" | awk '{print $1}')
+        else
+          warn "No sha256sum or shasum found — skipping verification"
+          ACTUAL_HASH=""
+        fi
+
+        if [ -n "$ACTUAL_HASH" ]; then
+          if [ "$ACTUAL_HASH" != "$EXPECTED_HASH" ]; then
+            rm -f "$TMP_FILE" "$TMP_CHECKSUMS"
+            error "SHA256 checksum mismatch!\n  Expected: ${EXPECTED_HASH}\n  Got:      ${ACTUAL_HASH}\n\nThe downloaded binary may have been tampered with. Aborting."
+          fi
+          success "SHA256 checksum verified"
+        fi
+      fi
+    else
+      warn "checksums.txt not available for ${VERSION} — skipping verification"
+      warn "Consider upgrading to a newer release that includes checksums"
+    fi
+
+    rm -f "$TMP_CHECKSUMS"
   fi
 
   chmod +x "$TMP_FILE"

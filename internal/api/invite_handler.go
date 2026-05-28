@@ -1,6 +1,7 @@
 package api
 
 import (
+	"log"
 	"net/http"
 	"time"
 
@@ -10,6 +11,15 @@ import (
 )
 
 const defaultInviteTTL = 24 * time.Hour
+
+// safeCodePrefix returns the first 16 characters of an invite code for audit
+// logging without exposing the full secret.
+func safeCodePrefix(code string) string {
+	if len(code) <= 16 {
+		return code[:len(code)/2] + "***"
+	}
+	return code[:16] + "***"
+}
 
 // CreateInvite generates an invite code for a project.
 // POST /api/projects/:id/invite
@@ -62,8 +72,13 @@ func (h *Handler) RedeemInvite(c echo.Context) error {
 
 	config, err := h.store.RedeemInviteCode(c.Request().Context(), req.Code)
 	if err != nil {
+		log.Printf("[AUDIT] invite redeem FAILED | ip=%s code_prefix=%s err=%v",
+			c.RealIP(), safeCodePrefix(req.Code), err)
 		return handleStoreError(c, err)
 	}
+
+	log.Printf("[AUDIT] invite redeem OK | ip=%s project=%s code_prefix=%s",
+		c.RealIP(), config.ProjectID, safeCodePrefix(req.Code))
 
 	return c.JSON(http.StatusOK, map[string]any{
 		"project_id":        config.ProjectID,

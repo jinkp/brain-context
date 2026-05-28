@@ -19,12 +19,17 @@ func NewServer(st *store.Store) *echo.Echo {
 	e.Use(middleware.Recover())
 
 	h := &Handler{store: st}
+	publicRL := newPublicRateLimiter()
+	authRL := newAuthRateLimiter()
+
 	apiGroup := e.Group("/api")
-	apiGroup.POST("/tenants/register", h.RegisterTenant)
-	apiGroup.POST("/auth/login", h.Login)
+
+	// Public endpoints — rate-limited to prevent abuse
+	apiGroup.POST("/tenants/register", h.RegisterTenant, publicRL)
+	apiGroup.POST("/auth/login", h.Login, publicRL)
 
 	authed := apiGroup.Group("", AuthMiddleware(st))
-	authed.POST("/auth/renew", h.RenewKey)
+	authed.POST("/auth/renew", h.RenewKey, authRL)
 
 	tenantOnly := authed.Group("", RequireScopes(auth.ScopeTenant))
 	tenantOnly.DELETE("/auth/keys/:id", h.RevokeKey)
@@ -33,14 +38,14 @@ func NewServer(st *store.Store) *echo.Echo {
 	tenantOnly.DELETE("/projects/:id", h.DeleteProject)
 	tenantOnly.PATCH("/projects/:id/rename", h.RenameProject)
 	tenantOnly.PATCH("/projects/:id/embed-key", h.UpdateEmbedKey)
-	tenantOnly.GET("/admin/metrics", h.GetMetrics)
-	tenantOnly.POST("/projects/:id/tokens", h.CreateProjectTokens)
+	tenantOnly.GET("/metrics", h.GetMetrics)
+	tenantOnly.POST("/projects/:id/tokens", h.CreateProjectTokens, authRL)
 	tenantOnly.GET("/projects/:id/tokens", h.ListProjectTokens)
-	tenantOnly.POST("/projects/:id/tokens/renew", h.RenewProjectTokens)
+	tenantOnly.POST("/projects/:id/tokens/renew", h.RenewProjectTokens, authRL)
 	tenantOnly.POST("/projects/:id/invite", h.CreateInvite)
 
-	// Public — no auth needed, the invite code IS the auth
-	apiGroup.POST("/invite/redeem", h.RedeemInvite)
+	// Public — no auth needed, the invite code IS the auth — rate-limited
+	apiGroup.POST("/invite/redeem", h.RedeemInvite, publicRL)
 
 	projectOnly := authed.Group("", RequireScopes(auth.ScopeProject))
 	projectOnly.POST("/projects/:id/chunks", h.UploadChunks)

@@ -14,7 +14,7 @@ TENANT_RESP=$(curl -sf -X POST "$API_URL/api/tenants/register" \
   -H "Content-Type: application/json" \
   -d '{"name":"smoke-tenant"}')
 TENANT_TOKEN=$(echo "$TENANT_RESP" | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
-echo "   Tenant token: ${TENANT_TOKEN:0:20}..."
+echo "   Tenant token: [redacted]"
 
 # 2. Create project
 echo "2. Creating project..."

@@ -1,5 +1,9 @@
 # brain-context installer for Windows
 # Usage: irm https://raw.githubusercontent.com/jinkp/brain-context/master/install.ps1 | iex
+#
+# Security: downloads SHA256 checksums from the release and verifies the
+# binary before installing.  Set $env:BRAIN_SKIP_CHECKSUM=1 to bypass
+# (not recommended).
 
 param(
     [string]$InstallDir = "$env:LOCALAPPDATA\brain-context\bin",
@@ -26,13 +30,14 @@ function Get-LatestVersion {
     }
 }
 
-# ── Download binary ───────────────────────────────────────────────────────────
+# ── Download and verify binary ─────────────────────────────────────────────────
 function Install-Binary {
     param($Version)
 
     $Filename = "brain-windows-amd64.exe"
     $Url = "https://github.com/$Repo/releases/download/$Version/$Filename"
-    $TmpFile = "$env:TEMP\brain-context-install.exe"
+    $ChecksumsUrl = "https://github.com/$Repo/releases/download/$Version/checksums.txt"
+    $TmpFile = Join-Path $env:TEMP "brain-install-$([System.IO.Path]::GetRandomFileName()).exe"
 
     Write-Info "Downloading brain-context $Version for Windows (amd64)..."
 
@@ -40,6 +45,34 @@ function Install-Binary {
         Invoke-WebRequest -Uri $Url -OutFile $TmpFile -UseBasicParsing
     } catch {
         Write-Fail "Download failed: $Url`nError: $_"
+    }
+
+    # ── SHA256 verification ───────────────────────────────────────────────
+    if ($env:BRAIN_SKIP_CHECKSUM -eq "1") {
+        Write-Warn "Checksum verification skipped (BRAIN_SKIP_CHECKSUM=1)"
+    } else {
+        Write-Info "Verifying SHA256 checksum..."
+        try {
+            $checksumContent = (Invoke-WebRequest -Uri $ChecksumsUrl -UseBasicParsing).Content
+            $line = ($checksumContent -split "`n") | Where-Object { $_ -match $Filename }
+
+            if ($line) {
+                $expectedHash = ($line -split "\s+")[0].Trim()
+                $actualHash = (Get-FileHash -Path $TmpFile -Algorithm SHA256).Hash.ToLower()
+
+                if ($actualHash -ne $expectedHash) {
+                    Remove-Item -Path $TmpFile -Force -ErrorAction SilentlyContinue
+                    Write-Fail "SHA256 checksum mismatch!`n  Expected: $expectedHash`n  Got:      $actualHash`n`nThe downloaded binary may have been tampered with. Aborting."
+                }
+
+                Write-Success "SHA256 checksum verified"
+            } else {
+                Write-Warn "Checksum entry not found for $Filename - skipping verification"
+            }
+        } catch {
+            Write-Warn "checksums.txt not available for $Version - skipping verification"
+            Write-Warn "Consider upgrading to a newer release that includes checksums"
+        }
     }
 
     if (-not (Test-Path $InstallDir)) {

@@ -10,6 +10,7 @@ coverage.out
 # Local env
 .env
 .env.*
+!.env.example
 
 # IDEs
 .idea/
@@ -27,3 +28,23 @@ pgdata/
 # Build artifacts
 dist/
 bin/
+
+# Cryptographic material — NEVER commit these
+*.pem
+*.key
+*.cert
+*.crt
+*.p12
+*.pfx
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Local config overrides (may contain real credentials)
+config.local.*
+*.local.yaml
+*.local.yml
+*.local.json
+secrets/
