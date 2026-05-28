@@ -1036,13 +1036,15 @@ func runScan(args []string) error {
 	if len(project.Include) > 0 {
 		fmt.Printf("  Project include:   %s\n", strings.Join(project.Include, ", "))
 	}
-	if len(bi.ExcludeDirs) > 0 {
-		fmt.Printf("  .brainignore exclude: %s\n", strings.Join(bi.ExcludeDirs, ", "))
+	if bi.Exists() {
+		patterns := bi.Patterns()
+		if len(patterns) > 0 {
+			fmt.Printf("  .brainignore:      %d patterns (%s)\n", len(patterns), strings.Join(patterns, ", "))
+		} else {
+			fmt.Println("  .brainignore:      found (empty)")
+		}
 	} else {
 		fmt.Println("  .brainignore:      not found")
-	}
-	if len(bi.IncludeExts) > 0 {
-		fmt.Printf("  .brainignore include: %s\n", strings.Join(bi.IncludeExts, ", "))
 	}
 	if scanOpts.Stack != "" {
 		fmt.Printf("  Stack filter:      %s\n", scanOpts.Stack)

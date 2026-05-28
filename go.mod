@@ -10,6 +10,7 @@ require (
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/labstack/echo/v4 v4.15.2
 	github.com/mark3labs/mcp-go v0.52.0
+	github.com/sabhiram/go-gitignore v0.0.0-20210923224102-525f6e181f06
 	golang.org/x/crypto v0.51.0
 	gopkg.in/yaml.v3 v3.0.1
 )

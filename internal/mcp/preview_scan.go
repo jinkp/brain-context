@@ -105,12 +105,13 @@ func formatPreviewScan(
 		hasConfig = true
 	}
 
-	if len(bi.ExcludeDirs) > 0 {
-		b.WriteString(fmt.Sprintf("**.brainignore exclude**: %s\n", strings.Join(bi.ExcludeDirs, ", ")))
-		hasConfig = true
-	}
-	if len(bi.IncludeExts) > 0 {
-		b.WriteString(fmt.Sprintf("**.brainignore include**: %s\n", strings.Join(bi.IncludeExts, ", ")))
+	if bi.Exists() {
+		patterns := bi.Patterns()
+		if len(patterns) > 0 {
+			b.WriteString(fmt.Sprintf("**.brainignore** (%d patterns): %s\n", len(patterns), strings.Join(patterns, ", ")))
+		} else {
+			b.WriteString("**.brainignore**: found (empty)\n")
+		}
 		hasConfig = true
 	}
 

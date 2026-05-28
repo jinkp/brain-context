@@ -134,25 +134,37 @@ All sources are **additive** (union) and evaluated in this order:
 1. **Hardcoded ignores** (always applied, not overridable): `node_modules`, `.git`, `dist`, `build`, `vendor`, binaries, images, lock files, etc.
 2. **Global config** (`~/.brain/config.yaml` top-level): applies to all projects.
 3. **Per-project config** (`~/.brain/config.yaml` per project): applies to one project.
-4. **`.brainignore`** file in the repository root: version-controlled, per-repo.
+4. **`.brainignore`** file in the repository root: gitignore syntax, version-controlled, per-repo.
 5. **CLI flags** `--exclude` / `--include`: one-time override for a specific run.
 
 ### .brainignore
 
-Place a `.brainignore` file at the root of your repository. Lines outside any section header default to `[exclude]`.
+Place a `.brainignore` file at the root of your repository. Uses **full gitignore syntax**: glob patterns, `**` recursive matching, `!` negation, directory trailing slash, and comments.
 
 ```text
-# Directories to exclude (default section)
-assets
-Migrations/
-docs
-generated
+# Exclude all CSS files
+*.css
 
-[include]
-# Extra file extensions to include when using --stack
-.proto
-.graphql
+# Exclude directories
+docs/
+build/
+dist/
+
+# Exclude generated code anywhere in the tree
+**/generated/**
+
+# Exclude test files
+*.test.js
+*.spec.ts
+
+# But keep this specific one
+!critical.test.js
+
+# Anchor to repo root only
+/config.local.yaml
 ```
+
+Extra file extensions to include (e.g. `.proto`, `.graphql`) are configured in `~/.brain/config.yaml` or via `--include` CLI flag, not in `.brainignore`.
 
 ### Config-based exclude/include
 

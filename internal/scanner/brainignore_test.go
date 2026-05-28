@@ -6,132 +6,121 @@ import (
 	"testing"
 )
 
-func TestLoadBrainIgnore(t *testing.T) {
+func TestLoadBrainIgnore_FileNotFound(t *testing.T) {
+	dir := t.TempDir()
+	bi, err := LoadBrainIgnore(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if bi.Exists() {
+		t.Error("expected Exists() == false when no file")
+	}
+	if bi.MatchesPath("anything.go") {
+		t.Error("expected no matches when no file")
+	}
+}
+
+func TestLoadBrainIgnore_EmptyFile(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, ".brainignore"), []byte(""), 0o644)
+
+	bi, err := LoadBrainIgnore(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !bi.Exists() {
+		t.Error("expected Exists() == true for empty file")
+	}
+	if len(bi.Patterns()) != 0 {
+		t.Errorf("expected 0 patterns, got %d", len(bi.Patterns()))
+	}
+}
+
+func TestLoadBrainIgnore_GitignorePatterns(t *testing.T) {
 	tests := []struct {
-		name        string
-		content     string // if empty, file is not created
-		wantExclude []string
-		wantInclude []string
-		wantErr     bool
+		name      string
+		content   string
+		matchYes  []string // paths that SHOULD be ignored
+		matchNo   []string // paths that should NOT be ignored
+		wantLines int
 	}{
 		{
-			name:        "file does not exist",
-			content:     "",
-			wantExclude: nil,
-			wantInclude: nil,
+			name:      "glob extension *.css",
+			content:   "*.css\n",
+			matchYes:  []string{"style.css", "src/main.css", "deep/nested/file.css"},
+			matchNo:   []string{"style.scss", "main.go", "css-file.txt"},
+			wantLines: 1,
 		},
 		{
-			name: "exclude only with default section",
-			content: `# Directories to exclude
-assets
-Migrations/
-Tests\
-`,
-			wantExclude: []string{"assets", "Migrations", "Tests"},
-			wantInclude: nil,
+			name:      "directory with trailing slash",
+			content:   "docs/\n",
+			matchYes:  []string{"docs/readme.md", "docs/api/spec.yaml"},
+			matchNo:   []string{"src/docs.go", "my-docs.txt"},
+			wantLines: 1,
 		},
 		{
-			name: "include only section",
-			content: `[include]
-.proto
-.graphql
-sql
-`,
-			wantExclude: nil,
-			wantInclude: []string{".proto", ".graphql", ".sql"},
+			name:      "double star glob",
+			content:   "**/generated/**\n",
+			matchYes:  []string{"generated/file.go", "src/generated/model.go", "a/b/generated/c/d.go"},
+			matchNo:   []string{"src/generator.go", "main.go"},
+			wantLines: 1,
 		},
 		{
-			name: "both sections",
-			content: `[exclude]
-assets
-docs/
-
-[include]
-.proto
-`,
-			wantExclude: []string{"assets", "docs"},
-			wantInclude: []string{".proto"},
+			name:      "negation with !",
+			content:   "*.log\n!important.log\n",
+			matchYes:  []string{"debug.log", "error.log", "dir/app.log"},
+			matchNo:   []string{"important.log", "main.go"},
+			wantLines: 2,
 		},
 		{
-			name: "comments and blank lines ignored",
-			content: `# This is a comment
-
-assets
-# Another comment
-
-[include]
-# Include proto files
-.proto
-`,
-			wantExclude: []string{"assets"},
-			wantInclude: []string{".proto"},
+			name:      "multiple patterns",
+			content:   "# Build artifacts\ndist/\nbuild/\n\n# Test files\n*.test.js\n*.spec.ts\n",
+			matchYes:  []string{"dist/bundle.js", "build/output.wasm", "app.test.js", "util.spec.ts"},
+			matchNo:   []string{"src/app.js", "main.ts", "test-utils.js"},
+			wantLines: 4,
 		},
 		{
-			name: "section headers are case insensitive",
-			content: `[EXCLUDE]
-assets
-[INCLUDE]
-.proto
-`,
-			wantExclude: []string{"assets"},
-			wantInclude: []string{".proto"},
+			name:      "leading slash anchors to root",
+			content:   "/config.yaml\n",
+			matchYes:  []string{"config.yaml"},
+			matchNo:   []string{"sub/config.yaml"},
+			wantLines: 1,
 		},
 		{
-			name: "mixed sections switch back and forth",
-			content: `[exclude]
-assets
-
-[include]
-.proto
-
-[exclude]
-Migrations
-
-[include]
-.graphql
-`,
-			wantExclude: []string{"assets", "Migrations"},
-			wantInclude: []string{".proto", ".graphql"},
+			name:      "subdirectory pattern",
+			content:   "src/assets/\n",
+			matchYes:  []string{"src/assets/logo.png", "src/assets/fonts/inter.woff2"},
+			matchNo:   []string{"assets/logo.png", "src/main.go"},
+			wantLines: 1,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
-
-			if tt.content != "" {
-				err := os.WriteFile(filepath.Join(dir, ".brainignore"), []byte(tt.content), 0o644)
-				if err != nil {
-					t.Fatalf("write .brainignore: %v", err)
-				}
-			}
+			os.WriteFile(filepath.Join(dir, ".brainignore"), []byte(tt.content), 0o644)
 
 			bi, err := LoadBrainIgnore(dir)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("error = %v, wantErr %v", err, tt.wantErr)
+			if err != nil {
+				t.Fatalf("LoadBrainIgnore error: %v", err)
+			}
+			if !bi.Exists() {
+				t.Fatal("expected Exists() == true")
+			}
+			if len(bi.Patterns()) != tt.wantLines {
+				t.Errorf("patterns count = %d, want %d", len(bi.Patterns()), tt.wantLines)
 			}
 
-			if !slicesEqual(bi.ExcludeDirs, tt.wantExclude) {
-				t.Errorf("ExcludeDirs = %v, want %v", bi.ExcludeDirs, tt.wantExclude)
+			for _, path := range tt.matchYes {
+				if !bi.MatchesPath(path) {
+					t.Errorf("expected %q to be ignored", path)
+				}
 			}
-			if !slicesEqual(bi.IncludeExts, tt.wantInclude) {
-				t.Errorf("IncludeExts = %v, want %v", bi.IncludeExts, tt.wantInclude)
+			for _, path := range tt.matchNo {
+				if bi.MatchesPath(path) {
+					t.Errorf("expected %q to NOT be ignored", path)
+				}
 			}
 		})
 	}
-}
-
-func slicesEqual(a, b []string) bool {
-	if len(a) == 0 && len(b) == 0 {
-		return true
-	}
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }

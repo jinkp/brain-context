@@ -1,6 +1,8 @@
 package mcp
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -13,16 +15,14 @@ func TestFormatPreviewScan_NoConfig(t *testing.T) {
 		{Path: "cmd/app.go", Language: "Go", SizeBytes: 200},
 	}
 
-	result := formatPreviewScan("/tmp/repo", "", nil, nil, nil, nil, scanner.BrainIgnore{}, files)
+	bi := scanner.BrainIgnore{} // no file = Exists() == false
+	result := formatPreviewScan("/tmp/repo", "", nil, nil, nil, nil, bi, files)
 
 	if !strings.Contains(result, "Total files**: 2") {
 		t.Errorf("expected total files 2, got:\n%s", result)
 	}
 	if !strings.Contains(result, "No custom exclude/include configured") {
 		t.Errorf("expected 'no custom' message, got:\n%s", result)
-	}
-	if !strings.Contains(result, ".brainignore") {
-		t.Errorf("expected .brainignore mention, got:\n%s", result)
 	}
 }
 
@@ -32,10 +32,11 @@ func TestFormatPreviewScan_WithAllSources(t *testing.T) {
 		{Path: "schema.proto", Language: "Protobuf"},
 		{Path: "src/app.ts", Language: "TypeScript"},
 	}
-	bi := scanner.BrainIgnore{
-		ExcludeDirs: []string{"docs", "tmp"},
-		IncludeExts: []string{".proto"},
-	}
+
+	// Create a real .brainignore to get a valid BrainIgnore with Exists()==true
+	tmpDir := t.TempDir()
+	os.WriteFile(filepath.Join(tmpDir, ".brainignore"), []byte("*.css\ndocs/\n"), 0o644)
+	bi, _ := scanner.LoadBrainIgnore(tmpDir)
 
 	result := formatPreviewScan(
 		"/home/user/repo", "go",
@@ -49,8 +50,7 @@ func TestFormatPreviewScan_WithAllSources(t *testing.T) {
 		"Global config include**: .proto",
 		"Project config exclude**: Tests",
 		"Project config include**: .graphql",
-		".brainignore exclude**: docs, tmp",
-		".brainignore include**: .proto",
+		".brainignore** (2 patterns)",
 		"Go: ",
 		"Protobuf: ",
 		"TypeScript: ",

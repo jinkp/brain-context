@@ -156,11 +156,11 @@ func Scan(root string, opts ...ScanOptions) ([]ScannedFile, error) {
 		return nil, fmt.Errorf("load .brainignore: %w", err)
 	}
 
-	// Build allowed extensions set from stack + all include sources
-	allowedExts := buildAllowedExtensions(opt, bi)
+	// Build allowed extensions set from stack + config include sources
+	allowedExts := buildAllowedExtensions(opt)
 
-	// Build extra excluded dirs from all exclude sources
-	excludedDirs := buildExcludedDirs(opt, bi)
+	// Build extra excluded dirs from config + CLI sources
+	excludedDirs := buildExcludedDirs(opt)
 
 	files := make([]ScannedFile, 0)
 	err = filepath.WalkDir(absRoot, func(path string, entry fs.DirEntry, walkErr error) error {
@@ -168,36 +168,51 @@ func Scan(root string, opts ...ScanOptions) ([]ScannedFile, error) {
 			return nil // skip errors
 		}
 
+		// Compute relative path once for both dir and file checks
+		rel, _ := filepath.Rel(absRoot, path)
+		relSlash := filepath.ToSlash(rel)
+
 		if entry.IsDir() {
+			// 1. Hardcoded ignores (always, not overridable)
 			name := strings.ToLower(entry.Name())
-			if shouldIgnoreDir(name) || excludedDirs[name] {
+			if shouldIgnoreDir(name) {
 				return filepath.SkipDir
 			}
-			// Also check relative path for nested excludes like "src/assets"
-			if len(excludedDirs) > 0 {
-				rel, _ := filepath.Rel(absRoot, path)
-				if rel != "" {
-					relSlash := strings.ToLower(filepath.ToSlash(rel))
-					for dir := range excludedDirs {
-						if relSlash == dir || strings.HasPrefix(relSlash, dir+"/") {
-							return filepath.SkipDir
-						}
+			// 2. Config/CLI excluded dirs (by name or relative path)
+			if excludedDirs[name] {
+				return filepath.SkipDir
+			}
+			if len(excludedDirs) > 0 && relSlash != "" {
+				lowerRel := strings.ToLower(relSlash)
+				for dir := range excludedDirs {
+					if lowerRel == dir || strings.HasPrefix(lowerRel, dir+"/") {
+						return filepath.SkipDir
 					}
 				}
+			}
+			// 3. .brainignore gitignore patterns
+			if relSlash != "" && relSlash != "." && bi.MatchesPath(relSlash) {
+				return filepath.SkipDir
 			}
 			return nil
 		}
 
+		// 1. Hardcoded file ignores (always)
 		if shouldIgnoreFile(entry.Name()) {
 			return nil
 		}
 
-		// Skip irregular files (symlinks, devices, pipes)
+		// 2. Skip irregular files (symlinks, devices, pipes)
 		if !entry.Type().IsRegular() {
 			return nil
 		}
 
-		// Stack filter: only process allowed extensions
+		// 3. .brainignore gitignore patterns (on files)
+		if bi.MatchesPath(relSlash) {
+			return nil
+		}
+
+		// 4. Stack/extension filter: only process allowed extensions
 		if len(allowedExts) > 0 {
 			ext := strings.ToLower(filepath.Ext(entry.Name()))
 			if !allowedExts[ext] {
@@ -244,12 +259,11 @@ func Scan(root string, opts ...ScanOptions) ([]ScannedFile, error) {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-func buildAllowedExtensions(opt ScanOptions, bi BrainIgnore) map[string]bool {
-	// Merge all include sources: global config + per-project config + .brainignore + CLI flags
-	allIncludes := make([]string, 0, len(opt.GlobalInclude)+len(opt.ProjectInclude)+len(bi.IncludeExts)+len(opt.Include))
+func buildAllowedExtensions(opt ScanOptions) map[string]bool {
+	// Merge include sources: global config + per-project config + CLI flags
+	allIncludes := make([]string, 0, len(opt.GlobalInclude)+len(opt.ProjectInclude)+len(opt.Include))
 	allIncludes = append(allIncludes, opt.GlobalInclude...)
 	allIncludes = append(allIncludes, opt.ProjectInclude...)
-	allIncludes = append(allIncludes, bi.IncludeExts...)
 	allIncludes = append(allIncludes, opt.Include...)
 
 	if opt.Stack == "" && len(allIncludes) == 0 {
@@ -280,12 +294,11 @@ func buildAllowedExtensions(opt ScanOptions, bi BrainIgnore) map[string]bool {
 	return allowed
 }
 
-func buildExcludedDirs(opt ScanOptions, bi BrainIgnore) map[string]bool {
-	// Merge all exclude sources: global config + per-project config + .brainignore + CLI flags
-	allExcludes := make([]string, 0, len(opt.GlobalExclude)+len(opt.ProjectExclude)+len(bi.ExcludeDirs)+len(opt.Exclude))
+func buildExcludedDirs(opt ScanOptions) map[string]bool {
+	// Merge exclude sources: global config + per-project config + CLI flags
+	allExcludes := make([]string, 0, len(opt.GlobalExclude)+len(opt.ProjectExclude)+len(opt.Exclude))
 	allExcludes = append(allExcludes, opt.GlobalExclude...)
 	allExcludes = append(allExcludes, opt.ProjectExclude...)
-	allExcludes = append(allExcludes, bi.ExcludeDirs...)
 	allExcludes = append(allExcludes, opt.Exclude...)
 
 	if len(allExcludes) == 0 {
