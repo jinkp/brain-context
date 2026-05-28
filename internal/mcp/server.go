@@ -20,6 +20,8 @@ const (
 type Server struct {
 	apiEndpoint      string
 	defaultProjectID string
+	globalExclude    []string // from config top-level
+	globalInclude    []string // from config top-level
 	projectsByID     map[string]brainconfig.ProjectConfig
 	projectsByName   map[string]string // name → project_id
 	httpClient       *http.Client
@@ -45,6 +47,8 @@ func New(defaultProjectName string) (*Server, error) {
 
 	srv := &Server{
 		apiEndpoint:    strings.TrimRight(strings.TrimSpace(cfg.APIEndpoint), "/"),
+		globalExclude:  cfg.Exclude,
+		globalInclude:  cfg.Include,
 		projectsByID:   projectsByID,
 		projectsByName: projectsByName,
 		httpClient:     &http.Client{Timeout: 30 * time.Second},
@@ -92,6 +96,7 @@ func (s *Server) registerTools(mcpServer *server.MCPServer) {
 	mcpServer.AddTool(getRelatedFilesTool(), s.handleGetRelatedFiles)
 	mcpServer.AddTool(explainFlowTool(), s.handleExplainFlow)
 	mcpServer.AddTool(findImpactTool(), s.handleFindImpact)
+	mcpServer.AddTool(previewScanTool(), s.handlePreviewScan)
 }
 
 func (s *Server) listProjectNames() string {

@@ -81,6 +81,8 @@ func main() {
 		err = runIndex(os.Args[2:])
 	case "update":
 		err = runUpdate(os.Args[2:])
+	case "scan":
+		err = runScan(os.Args[2:])
 	case "mcp":
 		err = runMCP(os.Args[2:])
 	case "projects":
@@ -388,6 +390,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  brain projects                  list registered projects")
 	fmt.Fprintln(os.Stderr, "  brain projects delete --project <name>  remove a project")
 	fmt.Fprintln(os.Stderr, "  brain projects rename --project <old> --name <new>  rename a project")
+	fmt.Fprintln(os.Stderr, "  brain scan           --project <name> [--stack <stack>]  preview which files would be indexed")
 	fmt.Fprintln(os.Stderr, "  brain mcp            [--project <name>]")
 	fmt.Fprintln(os.Stderr, "  brain tui                       interactive TUI (wizard, client setup, update)")
 	fmt.Fprintln(os.Stderr, "  brain tui clients               TUI — client selection only")
@@ -961,6 +964,123 @@ func runMCP(args []string) error {
 		return err
 	}
 	return srv.Start()
+}
+
+// ── scan (dry-run preview) ────────────────────────────────────────────────────
+
+func runScan(args []string) error {
+	fs := flag.NewFlagSet("scan", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	projectName := fs.String("project", "", "project name")
+	stack := fs.String("stack", "", "stack filter: go, dotnet, react, vue, angular, node, python, java, rust, ruby, php")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("parse scan flags: %w", err)
+	}
+	if strings.TrimSpace(*projectName) == "" {
+		return fmt.Errorf("--project is required")
+	}
+
+	cfg, err := brainconfig.Load()
+	if err != nil {
+		return err
+	}
+	project, ok := cfg.Projects[strings.TrimSpace(*projectName)]
+	if !ok {
+		return fmt.Errorf("project %q is not registered; run `brain register` first", strings.TrimSpace(*projectName))
+	}
+	repoPath := strings.TrimSpace(project.RepoPath)
+	if repoPath == "" {
+		return fmt.Errorf("project %q is missing repo_path", strings.TrimSpace(*projectName))
+	}
+	if err := validateRepoPath(repoPath); err != nil {
+		return err
+	}
+
+	absRoot, err := filepath.Abs(repoPath)
+	if err != nil {
+		return fmt.Errorf("resolve repo path: %w", err)
+	}
+
+	// Load .brainignore
+	bi, _ := scanner.LoadBrainIgnore(absRoot)
+
+	// Build scan options from all sources
+	scanOpts := scanner.ScanOptions{
+		Stack:          strings.TrimSpace(*stack),
+		GlobalExclude:  cfg.Exclude,
+		GlobalInclude:  cfg.Include,
+		ProjectExclude: project.Exclude,
+		ProjectInclude: project.Include,
+	}
+
+	fmt.Printf("Scanning %s...\n\n", absRoot)
+
+	files, err := scanner.Scan(absRoot, scanOpts)
+	if err != nil {
+		return fmt.Errorf("scan failed: %w", err)
+	}
+
+	// ── Report ───────────────────────────────────────────────────────────
+	fmt.Println("=== Scan Configuration ===")
+	fmt.Println()
+
+	if len(cfg.Exclude) > 0 {
+		fmt.Printf("  Global exclude:    %s\n", strings.Join(cfg.Exclude, ", "))
+	}
+	if len(cfg.Include) > 0 {
+		fmt.Printf("  Global include:    %s\n", strings.Join(cfg.Include, ", "))
+	}
+	if len(project.Exclude) > 0 {
+		fmt.Printf("  Project exclude:   %s\n", strings.Join(project.Exclude, ", "))
+	}
+	if len(project.Include) > 0 {
+		fmt.Printf("  Project include:   %s\n", strings.Join(project.Include, ", "))
+	}
+	if len(bi.ExcludeDirs) > 0 {
+		fmt.Printf("  .brainignore exclude: %s\n", strings.Join(bi.ExcludeDirs, ", "))
+	} else {
+		fmt.Println("  .brainignore:      not found")
+	}
+	if len(bi.IncludeExts) > 0 {
+		fmt.Printf("  .brainignore include: %s\n", strings.Join(bi.IncludeExts, ", "))
+	}
+	if scanOpts.Stack != "" {
+		fmt.Printf("  Stack filter:      %s\n", scanOpts.Stack)
+	}
+
+	fmt.Println()
+	fmt.Println("=== Results ===")
+	fmt.Println()
+
+	// Count by language
+	langCount := map[string]int{}
+	for _, f := range files {
+		langCount[f.Language]++
+	}
+
+	type langEntry struct {
+		Name  string
+		Count int
+	}
+	sorted := make([]langEntry, 0, len(langCount))
+	for name, count := range langCount {
+		sorted = append(sorted, langEntry{name, count})
+	}
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Count > sorted[j].Count })
+
+	fmt.Printf("  Total files: %d\n\n", len(files))
+	for _, entry := range sorted {
+		fmt.Printf("  %-14s %d files\n", entry.Name+":", entry.Count)
+	}
+
+	fmt.Println()
+	fmt.Println("=== File List ===")
+	fmt.Println()
+	for _, f := range files {
+		fmt.Printf("  %s\n", f.Path)
+	}
+
+	return nil
 }
 
 func runIndex(args []string) error {

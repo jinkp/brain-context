@@ -120,6 +120,7 @@ Each client setup registers the MCP server and, where supported, injects a proto
 | `brain projects` | List all registered projects with status and last indexed date. |
 | `brain projects delete --project <name>` | Delete a registered project. |
 | `brain projects rename --project <name> --new-name <new>` | Rename a registered project. |
+| `brain scan --project <name> [--stack <stack>]` | Preview which files would be indexed (dry-run). Shows active filtering config. |
 | `brain setup` | Launch the Bubbletea onboarding wizard with Catppuccin Mocha styling. |
 | `brain setup <client>` | Configure a specific client: `opencode`, `claude`, `cursor`, `gemini`, `windsurf`, or `all`. |
 | `brain mcp [--project <name>]` | Run the embedded MCP server, optionally pinned to one project. |
@@ -196,6 +197,7 @@ brain index --project my-repo --exclude "assets,Migrations" --include ".proto,.g
 | `get_related_files` | Traverse indexed relationships to find nearby files and dependencies. |
 | `explain_flow` | Explain an application flow, such as login or request handling. |
 | `find_impact` | Identify files and symbols affected by changing an entity. |
+| `preview_scan` | Preview which files would be scanned, showing active filtering configuration. |
 
 ## Embedder Models
 
