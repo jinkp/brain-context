@@ -23,7 +23,8 @@ type InviteCode struct {
 	ProjectID uuid.UUID
 	Code      string
 	ExpiresAt time.Time
-	UsedAt    *time.Time
+	MaxUses   int
+	UseCount  int
 	CreatedAt time.Time
 }
 
@@ -83,8 +84,9 @@ func (s *Store) GetEmbedAPIKey(ctx context.Context, tenantID, projectID uuid.UUI
 	return *enc, nil
 }
 
-// CreateInviteCode generates a new invite code for a project valid for ttl duration.
-func (s *Store) CreateInviteCode(ctx context.Context, tenantID, projectID uuid.UUID, ttl time.Duration) (InviteCode, error) {
+// CreateInviteCode generates a new invite code for a project.
+// ttl controls expiration; maxUses controls how many developers can redeem it (0 = unlimited).
+func (s *Store) CreateInviteCode(ctx context.Context, tenantID, projectID uuid.UUID, ttl time.Duration, maxUses int) (InviteCode, error) {
 	// Verify project belongs to tenant
 	if _, err := s.GetProject(ctx, tenantID, projectID); err != nil {
 		return InviteCode{}, err
@@ -95,19 +97,25 @@ func (s *Store) CreateInviteCode(ctx context.Context, tenantID, projectID uuid.U
 		return InviteCode{}, err
 	}
 
+	if maxUses < 0 {
+		maxUses = 0
+	}
+
 	invite := InviteCode{
 		ID:        uuid.New(),
 		TenantID:  tenantID,
 		ProjectID: projectID,
 		Code:      code,
 		ExpiresAt: time.Now().UTC().Add(ttl),
+		MaxUses:   maxUses,
+		UseCount:  0,
 		CreatedAt: time.Now().UTC(),
 	}
 
 	_, err = s.pool.Exec(ctx, `
-		INSERT INTO invite_codes (id, tenant_id, project_id, code, expires_at, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
-	`, invite.ID, invite.TenantID, invite.ProjectID, invite.Code, invite.ExpiresAt, invite.CreatedAt)
+		INSERT INTO invite_codes (id, tenant_id, project_id, code, expires_at, max_uses, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+	`, invite.ID, invite.TenantID, invite.ProjectID, invite.Code, invite.ExpiresAt, invite.MaxUses, invite.CreatedAt)
 	if err != nil {
 		return InviteCode{}, fmt.Errorf("create invite code: %w", err)
 	}
@@ -125,15 +133,15 @@ func (s *Store) redeemInvite(ctx context.Context, code string) (ProjectJoinConfi
 	// Step 1: Read invite without RLS (invite_codes has no RLS policy)
 	var invite InviteCode
 	err := s.pool.QueryRow(ctx, `
-		SELECT id, tenant_id, project_id, expires_at, used_at
+		SELECT id, tenant_id, project_id, expires_at, max_uses, use_count
 		FROM invite_codes
 		WHERE code = $1
-	`, code).Scan(&invite.ID, &invite.TenantID, &invite.ProjectID, &invite.ExpiresAt, &invite.UsedAt)
+	`, code).Scan(&invite.ID, &invite.TenantID, &invite.ProjectID, &invite.ExpiresAt, &invite.MaxUses, &invite.UseCount)
 	if err != nil {
 		return ProjectJoinConfig{}, ErrNotFound
 	}
-	if invite.UsedAt != nil {
-		return ProjectJoinConfig{}, fmt.Errorf("invite code already used")
+	if invite.MaxUses > 0 && invite.UseCount >= invite.MaxUses {
+		return ProjectJoinConfig{}, fmt.Errorf("invite code has reached its usage limit (%d/%d)", invite.UseCount, invite.MaxUses)
 	}
 	if time.Now().UTC().After(invite.ExpiresAt) {
 		return ProjectJoinConfig{}, fmt.Errorf("invite code expired")
@@ -158,25 +166,25 @@ func (s *Store) redeemInvite(ctx context.Context, code string) (ProjectJoinConfi
 		return ProjectJoinConfig{}, fmt.Errorf("project has no embed API key — ask your admin to run: brain register --project <name> --embed-api-key <key>")
 	}
 
-	// Step 3: Mark invite used + issue mcp_read key atomically
+	// Step 3: Increment use_count + issue mcp_read key atomically
 	var result ProjectJoinConfig
 
 	err = s.withTx(ctx, func(tx pgxTx) error {
-		// Re-check used_at inside tx to prevent races
-		var usedAt *time.Time
+		// Re-check use_count inside tx to prevent races (SELECT FOR UPDATE)
+		var maxUses, useCount int
 		if err := tx.QueryRow(ctx,
-			`SELECT used_at FROM invite_codes WHERE id = $1 FOR UPDATE`, invite.ID,
-		).Scan(&usedAt); err != nil {
+			`SELECT max_uses, use_count FROM invite_codes WHERE id = $1 FOR UPDATE`, invite.ID,
+		).Scan(&maxUses, &useCount); err != nil {
 			return ErrNotFound
 		}
-		if usedAt != nil {
-			return fmt.Errorf("invite code already used")
+		if maxUses > 0 && useCount >= maxUses {
+			return fmt.Errorf("invite code has reached its usage limit (%d/%d)", useCount, maxUses)
 		}
 
 		if _, err := tx.Exec(ctx,
-			`UPDATE invite_codes SET used_at = now() WHERE id = $1`, invite.ID,
+			`UPDATE invite_codes SET use_count = use_count + 1 WHERE id = $1`, invite.ID,
 		); err != nil {
-			return fmt.Errorf("mark invite used: %w", err)
+			return fmt.Errorf("increment invite use count: %w", err)
 		}
 
 		// Set tenant context for api_keys INSERT (RLS)

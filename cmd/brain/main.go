@@ -403,6 +403,8 @@ func printUsage() {
 type createInviteResponse struct {
 	Code      string    `json:"code"`
 	ExpiresAt time.Time `json:"expires_at"`
+	MaxUses   int       `json:"max_uses"`
+	UseCount  int       `json:"use_count"`
 	Message   string    `json:"message"`
 }
 
@@ -410,6 +412,8 @@ func runInvite(args []string) error {
 	fs := flag.NewFlagSet("invite", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	projectName := fs.String("project", "", "project name")
+	maxUses := fs.Int("max-uses", 1, "max redemptions (0 = unlimited)")
+	ttl := fs.String("ttl", "24h", "invite validity duration (e.g. 72h, 7d)")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("parse flags: %w", err)
 	}
@@ -425,24 +429,36 @@ func runInvite(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
+	body, _ := json.Marshal(map[string]any{
+		"max_uses": *maxUses,
+		"ttl":      *ttl,
+	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		apiEndpoint+"/api/projects/"+projectID+"/invite", nil)
+		apiEndpoint+"/api/projects/"+projectID+"/invite",
+		bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+tenantToken)
+	req.Header.Set("Content-Type", "application/json")
 
 	var resp createInviteResponse
 	if _, err := doJSON(req, &resp); err != nil {
 		return fmt.Errorf("create invite: %w", err)
 	}
 
+	usesLabel := "unlimited"
+	if resp.MaxUses > 0 {
+		usesLabel = fmt.Sprintf("%d", resp.MaxUses)
+	}
+
 	fmt.Println()
 	fmt.Printf("  Invite code for project %q:\n\n", *projectName)
 	fmt.Printf("  %s\n\n", resp.Code)
-	fmt.Printf("  Expires: %s\n", resp.ExpiresAt.Local().Format("2006-01-02 15:04:05"))
+	fmt.Printf("  Expires:  %s\n", resp.ExpiresAt.Local().Format("2006-01-02 15:04:05"))
+	fmt.Printf("  Max uses: %s\n", usesLabel)
 	fmt.Println()
-	fmt.Println("  Share with your developer. They run:")
+	fmt.Println("  Share with your team. They run:")
 	fmt.Printf("  brain join --code %s --api %s\n\n", resp.Code, apiEndpoint)
 	return nil
 }
