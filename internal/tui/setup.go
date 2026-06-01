@@ -81,39 +81,143 @@ func setupOpenCode(home, brainExe string) error {
 
 // ── Claude Code ───────────────────────────────────────────────────────────────
 
-func setupClaude(home, brainExe string) error {
-	// 1. Inject MCP entry into settings.json
-	settingsCandidates := []string{
-		filepath.Join(home, ".claude", "settings.json"),
-		filepath.Join(home, "Library", "Application Support", "Claude", "settings.json"),
-		filepath.Join(os.Getenv("APPDATA"), "Claude", "settings.json"),
-	}
-	settingsPath := firstExisting(settingsCandidates)
-	if settingsPath == "" {
-		settingsPath = settingsCandidates[0]
-	}
+// claudeDotPath returns the canonical user-scope Claude config file path.
+func claudeDotPath(home string) string {
+	return filepath.Join(home, ".claude.json")
+}
 
-	cfg, err := readJSONMap(settingsPath)
+// setupClaude configures Claude Code at user scope: writes to ~/.claude.json
+// (the canonical MCP target per official docs), injects the protocol into
+// ~/.claude/CLAUDE.md, and migrates any stale entry from ~/.claude/settings.json.
+func setupClaude(home, brainExe string) error {
+	// 1. Merge MCP entry into ~/.claude.json
+	clodotPath := claudeDotPath(home)
+
+	cfg, err := readJSONMap(clodotPath)
 	if err != nil {
+		if !os.IsNotExist(err) {
+			// File exists but is invalid JSON — abort without writing
+			return fmt.Errorf("read %s: %w", clodotPath, err)
+		}
 		cfg = map[string]any{}
 	}
 
 	mcpServers := getOrCreateMap(cfg, "mcpServers")
 	mcpServers["brain-context"] = map[string]any{
+		"type":    "stdio",
 		"command": brainExe,
 		"args":    []string{"mcp"},
 	}
 	cfg["mcpServers"] = mcpServers
 
-	if err := writeJSONMap(settingsPath, cfg); err != nil {
+	if err := writeJSONMap(clodotPath, cfg); err != nil {
 		return err
 	}
 
-	// 2. Inject protocol into CLAUDE.md (global instructions file)
-	claudeDir := filepath.Dir(settingsPath)
-	claudeMD := filepath.Join(claudeDir, "CLAUDE.md")
+	// 2. Best-effort migration: remove stale entry from ~/.claude/settings.json
+	if err := migrateOldSettings(home); err != nil {
+		fmt.Fprintf(os.Stderr, "  ⚠️  settings.json migration skipped: %v\n", err)
+	}
 
+	// 3. Inject protocol into ~/.claude/CLAUDE.md
+	claudeMD := filepath.Join(home, ".claude", "CLAUDE.md")
 	return injectProtocolIntoFile(claudeMD)
+}
+
+// migrateOldSettings removes the brain-context entry from ~/.claude/settings.json
+// if present. Best-effort — errors are returned but callers should not fail on them.
+func migrateOldSettings(home string) error {
+	settingsPath := filepath.Join(home, ".claude", "settings.json")
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // file doesn't exist — no-op
+		}
+		return fmt.Errorf("read settings.json: %w", err)
+	}
+
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return fmt.Errorf("parse settings.json: %w", err)
+	}
+
+	mcpServers, ok := cfg["mcpServers"].(map[string]any)
+	if !ok {
+		return nil // no mcpServers key — no-op
+	}
+	if _, has := mcpServers["brain-context"]; !has {
+		return nil // key not present — no-op
+	}
+
+	delete(mcpServers, "brain-context")
+	cfg["mcpServers"] = mcpServers
+	return writeJSONMap(settingsPath, cfg)
+}
+
+// setupClaudeLocal configures Claude Code at local scope: for each registered
+// brain-context project, writes .mcp.json in the project repo root with a
+// --project <name> arg so Claude Code scopes the MCP server to that project.
+func setupClaudeLocal(home, brainExe string) error {
+	brainCfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load brain config: %w", err)
+	}
+	return setupClaudeLocalWithConfig(brainCfg, brainExe)
+}
+
+// setupClaudeLocalWithConfig is the testable core of setupClaudeLocal.
+// It accepts an explicit config.Config so tests can inject temp-dir projects
+// without touching the real ~/.brain/config.yaml.
+func setupClaudeLocalWithConfig(brainCfg config.Config, brainExe string) error {
+	for name, proj := range brainCfg.Projects {
+		repoPath := strings.TrimSpace(proj.RepoPath)
+		if repoPath == "" {
+			continue
+		}
+
+		// 1. Write .mcp.json
+		mcpPath := filepath.Join(repoPath, ".mcp.json")
+		mcpCfg, err := readJSONMap(mcpPath)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				fmt.Fprintf(os.Stderr, "  ⚠️  claude local: parse %s: %v\n", mcpPath, err)
+				continue
+			}
+			mcpCfg = map[string]any{}
+		}
+
+		mcpServers := getOrCreateMap(mcpCfg, "mcpServers")
+		mcpServers["brain-context"] = map[string]any{
+			"command": brainExe,
+			"args":    []string{"mcp", "--project", name},
+		}
+		mcpCfg["mcpServers"] = mcpServers
+
+		if err := writeJSONMap(mcpPath, mcpCfg); err != nil {
+			fmt.Fprintf(os.Stderr, "  ⚠️  claude local: write %s: %v\n", mcpPath, err)
+			continue
+		}
+
+		// 2. Inject protocol into <repo>/CLAUDE.md
+		claudeMD := filepath.Join(repoPath, "CLAUDE.md")
+		if err := injectProtocolIntoFile(claudeMD); err != nil {
+			fmt.Fprintf(os.Stderr, "  ⚠️  claude local: protocol injection skipped for %s: %v\n", repoPath, err)
+		}
+	}
+
+	return nil
+}
+
+// SetupClientLocal is the exported entry point for local-scope setup.
+// For "claude" it calls setupClaudeLocal; all other clients fall through
+// to the standard user-scope setup (local scope only differs for Claude Code).
+func SetupClientLocal(client, home, brainExe string) error {
+	switch client {
+	case "claude":
+		return setupClaudeLocal(home, brainExe)
+	default:
+		return setupClient(client, home, brainExe)
+	}
 }
 
 // ── Cursor ────────────────────────────────────────────────────────────────────

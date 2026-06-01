@@ -257,16 +257,31 @@ func (m Model) viewClients() string {
 			check = dimStyle.Render("[ ]")
 		}
 
-		label := normalStyle.Render(opt.label)
+		label := opt.label
+		// Append scope hint to Claude Code row when it is focused
+		if i == 1 && i == m.clientCursor {
+			if m.claudeScope == "local" {
+				label += "  [L]ocal"
+			} else {
+				label += "  [G]lobal"
+			}
+		}
+
 		if i == m.clientCursor {
-			label = selectedStyle.Render(opt.label)
+			label = selectedStyle.Render(label)
+		} else {
+			label = normalStyle.Render(label)
 		}
 
 		b.WriteString(fmt.Sprintf("%s%s %s\n", cursor, check, label))
 	}
 
 	b.WriteString("\n")
-	b.WriteString(helpStyle.Render("↑↓ navigate  •  Space toggle  •  A toggle all  •  Enter continue  •  Esc back"))
+	helpText := "↑↓ navigate  •  Space toggle  •  A toggle all  •  Enter continue  •  Esc back"
+	if m.clientCursor == 1 {
+		helpText += "  •  s toggle scope"
+	}
+	b.WriteString(helpStyle.Render(helpText))
 
 	return b.String()
 }

@@ -125,6 +125,7 @@ type Model struct {
 	// step 3 — clients
 	clientChecked [5]bool
 	clientCursor  int
+	claudeScope   string // "user" | "local"; default "user"
 
 	// step 4 — done
 	clientResults map[string]error
@@ -184,6 +185,7 @@ func New(brainExe string, currentVersion string, clientsOnly ...bool) Model {
 		brainExe:       brainExe,
 		currentVersion: currentVersion,
 		clientsOnly:    isClientsOnly,
+		claudeScope:    "user",
 	}
 }
 

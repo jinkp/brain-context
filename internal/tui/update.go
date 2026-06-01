@@ -258,6 +258,16 @@ func (m Model) updateClients(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case " ":
 		m.clientChecked[m.clientCursor] = !m.clientChecked[m.clientCursor]
 
+	case "s":
+		// Toggle Claude scope only when cursor is on the Claude Code row (index 1)
+		if m.clientCursor == 1 {
+			if m.claudeScope == "user" {
+				m.claudeScope = "local"
+			} else {
+				m.claudeScope = "user"
+			}
+		}
+
 	case "a":
 		// toggle all
 		all := true
@@ -283,7 +293,7 @@ func (m Model) updateClients(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.clientResults = map[string]error{}
 			return m, nil
 		}
-		return m, doSetupClients(m.brainExe, selected)
+		return m, doSetupClients(m.brainExe, m.claudeScope, selected)
 	}
 
 	return m, nil
@@ -368,12 +378,16 @@ func doLogin(apiURL, token string) tea.Cmd {
 	}
 }
 
-func doSetupClients(brainExe string, clients []string) tea.Cmd {
+func doSetupClients(brainExe, claudeScope string, clients []string) tea.Cmd {
 	return func() tea.Msg {
 		home := userHome()
 		results := make(map[string]error, len(clients))
 		for _, c := range clients {
-			results[c] = setupClient(c, home, brainExe)
+			if c == "claude" && claudeScope == "local" {
+				results[c] = setupClaudeLocal(home, brainExe)
+			} else {
+				results[c] = setupClient(c, home, brainExe)
+			}
 		}
 		return setupClientsDoneMsg{results: results}
 	}

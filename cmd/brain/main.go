@@ -923,6 +923,19 @@ func runSetup(args []string) error {
 	if args[0] == "--clients" || args[0] == "clients" {
 		return runSetupTUI(true)
 	}
+
+	// Parse --scope flag from remaining args
+	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	scope := fs.String("scope", "user", "setup scope: user (global ~/.claude.json) or local (.mcp.json per project)")
+	if err := fs.Parse(args[1:]); err != nil {
+		return fmt.Errorf("parse setup flags: %w", err)
+	}
+
+	if *scope != "user" && *scope != "local" {
+		return fmt.Errorf("--scope must be \"user\" or \"local\", got %q", *scope)
+	}
+
 	client := strings.ToLower(strings.TrimSpace(args[0]))
 
 	home, err := os.UserHomeDir()
@@ -945,8 +958,14 @@ func runSetup(args []string) error {
 
 	anyOK := false
 	for _, t := range targets {
-		if err := braintui.SetupClient(t, home, brainExe); err != nil {
-			fmt.Fprintf(os.Stderr, "  ⚠️  %s: %v\n", t, err)
+		var setupErr error
+		if *scope == "local" {
+			setupErr = braintui.SetupClientLocal(t, home, brainExe)
+		} else {
+			setupErr = braintui.SetupClient(t, home, brainExe)
+		}
+		if setupErr != nil {
+			fmt.Fprintf(os.Stderr, "  ⚠️  %s: %v\n", t, setupErr)
 		} else {
 			fmt.Printf("  ✅ %s configured\n", t)
 			anyOK = true
