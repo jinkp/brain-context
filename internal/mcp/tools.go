@@ -21,11 +21,32 @@ import (
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 )
 
+const (
+	defaultSmartThreshold = 0.50
+	probeCap              = 3
+)
+
 var (
 	errLoginRequired  = errors.New("Run 'brain login' first")
 	errUnauthorized   = errors.New("Invalid or expired token. Run 'brain login' to refresh.")
 	errAPIUnreachable = errors.New("Cannot connect to brain-context API. Check your connection.")
 )
+
+type skippedProject struct {
+	Name       string
+	ProbeScore float64
+}
+
+// probeMaxScore returns the highest Score in chunks, or 0.0 if empty.
+func probeMaxScore(chunks []searchChunkResult) float64 {
+	max := 0.0
+	for _, c := range chunks {
+		if c.Score > max {
+			max = c.Score
+		}
+	}
+	return max
+}
 
 type projectNotRegisteredError struct {
 	name string
@@ -159,6 +180,7 @@ func searchSolutionContextTool() mcpgo.Tool {
 		mcpgo.WithString("query", mcpgo.Required(), mcpgo.Description("Natural language search query")),
 		mcpgo.WithNumber("max_chunks", mcpgo.Description("Max chunks to return (default 20)")),
 		mcpgo.WithBoolean("include_relationships", mcpgo.Description("Include symbol relationships")),
+		mcpgo.WithString("mode", mcpgo.Description("Routing mode: smart (default, two-pass probe+deep) or full (fan-out to all projects unconditionally).")),
 	)
 }
 
@@ -266,6 +288,10 @@ func (s *Server) handleSearchSolutionContext(ctx context.Context, req mcpgo.Call
 	}
 	maxChunks := clampToolNumber(req.GetFloat("max_chunks", 20), 20, 50)
 	includeRelationships := req.GetBool("include_relationships", false)
+	mode := strings.TrimSpace(req.GetString("mode", "smart"))
+	if mode == "" {
+		mode = "smart"
+	}
 
 	// Resolve solution → list of project configs
 	projects, err := s.resolveSolution(solutionName)
@@ -294,88 +320,276 @@ func (s *Server) handleSearchSolutionContext(ctx context.Context, req mcpgo.Call
 	}
 	queryEmbedding := vectors[0]
 
-	// Per-project candidate cap: max(10, 50/N)
-	n := len(projects)
-	perProjectCap := 50 / n
-	if perProjectCap < 10 {
-		perProjectCap = 10
+	// Resolve effective threshold (for smart mode)
+	customThreshold := 0.0
+	if sol, ok := s.solutionsByName[strings.ToLower(solutionName)]; ok && sol.SmartThreshold != 0 {
+		customThreshold = sol.SmartThreshold
 	}
 
-	// Fan-out: search each project in parallel
-	type projectResult struct {
+	params := solutionSearchParams{
+		solutionName:         solutionName,
+		query:                query,
+		queryEmbedding:       queryEmbedding,
+		maxChunks:            maxChunks,
+		includeRelationships: includeRelationships,
+		mode:                 mode,
+		threshold:            customThreshold,
+	}
+	result, err := s.solutionFanOut(ctx, params, projects)
+	if err != nil {
+		return toolError(err), nil
+	}
+	return textResult(result), nil
+}
+
+// solutionSearchParams holds pre-parsed parameters for the fan-out logic.
+// Used by tests to bypass the embedder and drive fan-out directly.
+type solutionSearchParams struct {
+	solutionName         string
+	query                string
+	queryEmbedding       []float32
+	maxChunks            int
+	includeRelationships bool
+	mode                 string
+	threshold            float64 // 0 → use defaultSmartThreshold
+}
+
+// solutionFanOut executes the full or smart fan-out logic given pre-computed params.
+// Exported for testing without a real embedder.
+func (s *Server) solutionFanOut(ctx context.Context, params solutionSearchParams, projects []brainconfig.ProjectConfig) (string, error) {
+	n := len(projects)
+	solutionName := params.solutionName
+	queryEmbedding := params.queryEmbedding
+	query := params.query
+	maxChunks := params.maxChunks
+	if maxChunks <= 0 {
+		maxChunks = 20
+	}
+	includeRelationships := params.includeRelationships
+	mode := params.mode
+	if mode == "" {
+		mode = "smart"
+	}
+
+	// ── FULL MODE ────────────────────────────────────────────────────────────
+	if mode == "full" {
+		perProjectCap := 50 / n
+		if perProjectCap < 10 {
+			perProjectCap = 10
+		}
+		type projectResult struct {
+			chunks  []searchChunkResult
+			warning string
+		}
+		results := make([]projectResult, n)
+		var mu sync.Mutex
+		var wg sync.WaitGroup
+		for i, proj := range projects {
+			wg.Add(1)
+			go func(idx int, project brainconfig.ProjectConfig) {
+				defer wg.Done()
+				if strings.TrimSpace(project.MCPReadKey) == "" {
+					mu.Lock()
+					results[idx] = projectResult{warning: fmt.Sprintf("%s: no mcp_read_key configured (skipped)", project.ProjectID)}
+					mu.Unlock()
+					return
+				}
+				payload := searchRequest{
+					QueryEmbedding:       queryEmbedding,
+					QueryTSV:             query,
+					MaxChunks:            perProjectCap,
+					IncludeRelationships: includeRelationships,
+				}
+				endpoint := fmt.Sprintf("%s/api/projects/%s/context/search", s.apiEndpoint, strings.TrimSpace(project.ProjectID))
+				var resp searchResponse
+				if err := s.doJSON(ctx, http.MethodPost, endpoint, project.MCPReadKey, payload, &resp); err != nil {
+					mu.Lock()
+					results[idx] = projectResult{warning: fmt.Sprintf("%s: %v", project.ProjectID, err)}
+					mu.Unlock()
+					return
+				}
+				projectName := s.projectName(project.ProjectID)
+				chunks := make([]searchChunkResult, len(resp.Chunks))
+				for j, c := range resp.Chunks {
+					chunks[j] = c
+					chunks[j].ProjectName = projectName
+				}
+				mu.Lock()
+				results[idx] = projectResult{chunks: chunks}
+				mu.Unlock()
+			}(i, proj)
+		}
+		wg.Wait()
+		var allChunks []searchChunkResult
+		var warnings []string
+		for _, r := range results {
+			allChunks = append(allChunks, r.chunks...)
+			if r.warning != "" {
+				warnings = append(warnings, r.warning)
+			}
+		}
+		if len(allChunks) == 0 && len(warnings) == n {
+			return "", fmt.Errorf("all projects in solution %q failed: %s", solutionName, strings.Join(warnings, "; "))
+		}
+		sort.Slice(allChunks, func(i, j int) bool { return allChunks[i].Score > allChunks[j].Score })
+		if len(allChunks) > maxChunks {
+			allChunks = allChunks[:maxChunks]
+		}
+		return formatSolutionResults(solutionName, query, allChunks, n, warnings), nil
+	}
+
+	// ── SMART MODE ───────────────────────────────────────────────────────────
+	threshold := params.threshold
+	if threshold == 0 {
+		threshold = defaultSmartThreshold
+	}
+
+	// PASS 1 — probe
+	type probeResult struct {
 		chunks  []searchChunkResult
 		warning string
+		failed  bool
 	}
-
-	results := make([]projectResult, n)
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-
+	probeResults := make([]probeResult, n)
+	var probeMu sync.Mutex
+	var probeWg sync.WaitGroup
 	for i, proj := range projects {
-		wg.Add(1)
+		probeWg.Add(1)
 		go func(idx int, project brainconfig.ProjectConfig) {
-			defer wg.Done()
-
+			defer probeWg.Done()
 			if strings.TrimSpace(project.MCPReadKey) == "" {
-				mu.Lock()
-				results[idx] = projectResult{warning: fmt.Sprintf("%s: no mcp_read_key configured (skipped)", project.ProjectID)}
-				mu.Unlock()
+				probeMu.Lock()
+				probeResults[idx] = probeResult{
+					warning: fmt.Sprintf("%s: no mcp_read_key configured (skipped)", project.ProjectID),
+					failed:  true,
+				}
+				probeMu.Unlock()
 				return
 			}
-
 			payload := searchRequest{
 				QueryEmbedding:       queryEmbedding,
 				QueryTSV:             query,
-				MaxChunks:            perProjectCap,
-				IncludeRelationships: includeRelationships,
+				MaxChunks:            probeCap,
+				IncludeRelationships: false,
 			}
 			endpoint := fmt.Sprintf("%s/api/projects/%s/context/search", s.apiEndpoint, strings.TrimSpace(project.ProjectID))
 			var resp searchResponse
 			if err := s.doJSON(ctx, http.MethodPost, endpoint, project.MCPReadKey, payload, &resp); err != nil {
-				mu.Lock()
-				results[idx] = projectResult{warning: fmt.Sprintf("%s: %v", project.ProjectID, err)}
-				mu.Unlock()
+				probeMu.Lock()
+				probeResults[idx] = probeResult{
+					warning: fmt.Sprintf("%s (probe): %v", project.ProjectID, err),
+					failed:  true,
+				}
+				probeMu.Unlock()
 				return
 			}
-
-			// Tag chunks with project name
 			projectName := s.projectName(project.ProjectID)
 			chunks := make([]searchChunkResult, len(resp.Chunks))
 			for j, c := range resp.Chunks {
 				chunks[j] = c
 				chunks[j].ProjectName = projectName
 			}
-			mu.Lock()
-			results[idx] = projectResult{chunks: chunks}
-			mu.Unlock()
+			probeMu.Lock()
+			probeResults[idx] = probeResult{chunks: chunks}
+			probeMu.Unlock()
 		}(i, proj)
 	}
-	wg.Wait()
+	probeWg.Wait()
 
-	// Merge results
-	var allChunks []searchChunkResult
-	var warnings []string
-	for _, r := range results {
-		allChunks = append(allChunks, r.chunks...)
-		if r.warning != "" {
-			warnings = append(warnings, r.warning)
+	// Filter
+	var allWarnings []string
+	var relevantProjects []brainconfig.ProjectConfig
+	var skipped []skippedProject
+	for i, proj := range projects {
+		pr := probeResults[i]
+		if pr.failed {
+			if pr.warning != "" {
+				allWarnings = append(allWarnings, pr.warning)
+			}
+			continue
+		}
+		score := probeMaxScore(pr.chunks)
+		if score >= threshold {
+			relevantProjects = append(relevantProjects, proj)
+		} else {
+			skipped = append(skipped, skippedProject{
+				Name:       s.projectName(proj.ProjectID),
+				ProbeScore: score,
+			})
 		}
 	}
 
-	if len(allChunks) == 0 && len(warnings) == len(projects) {
-		return toolError(fmt.Errorf("all projects in solution %q failed: %s", solutionName, strings.Join(warnings, "; "))), nil
+	// Fallback
+	if len(relevantProjects) == 0 {
+		allWarnings = append(allWarnings, fmt.Sprintf("No project exceeded threshold %.2f; falling back to full search", threshold))
+		for i, proj := range projects {
+			if !probeResults[i].failed {
+				relevantProjects = append(relevantProjects, proj)
+			}
+		}
+		skipped = nil
 	}
 
-	// Sort by score descending, take top maxChunks
-	sort.Slice(allChunks, func(i, j int) bool {
-		return allChunks[i].Score > allChunks[j].Score
-	})
+	// PASS 2 — deep
+	m := len(relevantProjects)
+	if m == 0 {
+		return formatSmartResults(solutionName, nil, n, skipped, threshold, allWarnings), nil
+	}
+	deepCap := 50 / m
+	if deepCap < 10 {
+		deepCap = 10
+	}
+	type deepResult struct {
+		chunks  []searchChunkResult
+		warning string
+	}
+	deepResults := make([]deepResult, m)
+	var deepMu sync.Mutex
+	var deepWg sync.WaitGroup
+	for i, proj := range relevantProjects {
+		deepWg.Add(1)
+		go func(idx int, project brainconfig.ProjectConfig) {
+			defer deepWg.Done()
+			payload := searchRequest{
+				QueryEmbedding:       queryEmbedding,
+				QueryTSV:             query,
+				MaxChunks:            deepCap,
+				IncludeRelationships: includeRelationships,
+			}
+			endpoint := fmt.Sprintf("%s/api/projects/%s/context/search", s.apiEndpoint, strings.TrimSpace(project.ProjectID))
+			var resp searchResponse
+			if err := s.doJSON(ctx, http.MethodPost, endpoint, project.MCPReadKey, payload, &resp); err != nil {
+				deepMu.Lock()
+				deepResults[idx] = deepResult{warning: fmt.Sprintf("%s: %v", project.ProjectID, err)}
+				deepMu.Unlock()
+				return
+			}
+			projectName := s.projectName(project.ProjectID)
+			chunks := make([]searchChunkResult, len(resp.Chunks))
+			for j, c := range resp.Chunks {
+				chunks[j] = c
+				chunks[j].ProjectName = projectName
+			}
+			deepMu.Lock()
+			deepResults[idx] = deepResult{chunks: chunks}
+			deepMu.Unlock()
+		}(i, proj)
+	}
+	deepWg.Wait()
+
+	var allChunks []searchChunkResult
+	for _, r := range deepResults {
+		allChunks = append(allChunks, r.chunks...)
+		if r.warning != "" {
+			allWarnings = append(allWarnings, r.warning)
+		}
+	}
+
+	sort.Slice(allChunks, func(i, j int) bool { return allChunks[i].Score > allChunks[j].Score })
 	if len(allChunks) > maxChunks {
 		allChunks = allChunks[:maxChunks]
 	}
-
-	result := formatSolutionResults(solutionName, query, allChunks, len(projects), warnings)
-	return textResult(result), nil
+	return formatSmartResults(solutionName, allChunks, n, skipped, threshold, allWarnings), nil
 }
 
 // resolveSolution looks up a solution by name and returns member project configs.
@@ -418,6 +632,44 @@ func (s *Server) projectName(projectID string) string {
 func formatSolutionResults(solutionName, query string, chunks []searchChunkResult, totalProjects int, warnings []string) string {
 	var builder strings.Builder
 	builder.WriteString(fmt.Sprintf("## Solution Context for: %q (solution: %s, %d projects)\n", query, solutionName, totalProjects))
+	if len(chunks) == 0 {
+		builder.WriteString("\nNo relevant context found.")
+	} else {
+		for _, chunk := range chunks {
+			builder.WriteString("\n")
+			projectLabel := ""
+			if chunk.ProjectName != "" {
+				projectLabel = fmt.Sprintf(" [Project: %s]", chunk.ProjectName)
+			}
+			builder.WriteString(fmt.Sprintf("\n### %s — %s (%s, lines %d-%d)%s\n",
+				chunk.FilePath, displaySymbolName(chunk.SymbolName), displaySymbolType(chunk.SymbolType),
+				chunk.StartLine, chunk.EndLine, projectLabel))
+			builder.WriteString(fmt.Sprintf("Score: %.2f\n", chunk.Score))
+			if len(chunk.Relationships) > 0 {
+				builder.WriteString("Relationships: " + formatRelationships(chunk.Relationships) + "\n")
+			}
+		}
+	}
+	if len(warnings) > 0 {
+		builder.WriteString("\n\n### Warnings\n")
+		for _, w := range warnings {
+			builder.WriteString("- " + w + "\n")
+		}
+	}
+	return builder.String()
+}
+
+func formatSmartResults(solutionName string, chunks []searchChunkResult, totalProjects int, skipped []skippedProject, threshold float64, warnings []string) string {
+	var builder strings.Builder
+	builder.WriteString(fmt.Sprintf("## Solution Context: %q | mode: smart | threshold: %.2f\n", solutionName, threshold))
+	builder.WriteString(fmt.Sprintf("## Projects searched: %d/%d\n", totalProjects-len(skipped), totalProjects))
+	if len(skipped) > 0 {
+		parts := make([]string, 0, len(skipped))
+		for _, sp := range skipped {
+			parts = append(parts, fmt.Sprintf("%s (probe: %.2f)", sp.Name, sp.ProbeScore))
+		}
+		builder.WriteString("## Skipped (below threshold): " + strings.Join(parts, ", ") + "\n")
+	}
 	if len(chunks) == 0 {
 		builder.WriteString("\nNo relevant context found.")
 	} else {

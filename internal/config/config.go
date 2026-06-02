@@ -17,7 +17,8 @@ var allowedDimensions = map[int]struct{}{
 }
 
 type SolutionConfig struct {
-	Projects []string `yaml:"projects"` // project names (keys in Config.Projects)
+	Projects       []string `yaml:"projects"`                   // project names (keys in Config.Projects)
+	SmartThreshold float64  `yaml:"smart_threshold,omitempty"` // 0 → runtime default 0.50; valid range [0.0, 1.0]
 }
 
 type Config struct {
@@ -125,6 +126,9 @@ func Validate(cfg Config) error {
 	for solutionName, solution := range cfg.Solutions {
 		if len(solution.Projects) < 2 {
 			return fmt.Errorf("solution %q must have at least 2 projects", solutionName)
+		}
+		if solution.SmartThreshold != 0 && (solution.SmartThreshold < 0.0 || solution.SmartThreshold > 1.0) {
+			return fmt.Errorf("solution %q: smart_threshold must be in [0.0, 1.0]", solutionName)
 		}
 		var referenceModel string
 		var referenceDims int

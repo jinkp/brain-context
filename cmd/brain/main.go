@@ -936,6 +936,7 @@ func runSolutionCreate(args []string) error {
 	fs.SetOutput(io.Discard)
 	name := fs.String("name", "", "solution name")
 	projects := fs.String("projects", "", "comma-separated list of project names")
+	threshold := fs.Float64("threshold", 0.0, "smart routing threshold 0.0-1.0 (default 0.50)")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("parse flags: %w", err)
 	}
@@ -987,11 +988,18 @@ func runSolutionCreate(args []string) error {
 		}
 	}
 
+	if *threshold != 0 && (*threshold < 0.0 || *threshold > 1.0) {
+		return fmt.Errorf("--threshold must be between 0.0 and 1.0, got %.2f", *threshold)
+	}
+
 	solutionName := strings.TrimSpace(*name)
 	if cfg.Solutions == nil {
 		cfg.Solutions = map[string]brainconfig.SolutionConfig{}
 	}
-	cfg.Solutions[solutionName] = brainconfig.SolutionConfig{Projects: projectNames}
+	cfg.Solutions[solutionName] = brainconfig.SolutionConfig{
+		Projects:       projectNames,
+		SmartThreshold: *threshold,
+	}
 	if err := brainconfig.Save(cfg); err != nil {
 		return fmt.Errorf("save config: %w", err)
 	}
