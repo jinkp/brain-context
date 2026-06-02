@@ -34,6 +34,8 @@ type CandidateChunk struct {
 	FinalScore         float64        `json:"final_score"`
 	Relationships      []Relationship `json:"relationships,omitempty"`
 	SearchVectorTokens string         `json:"-"`
+	ProjectID          uuid.UUID      `json:"project_id,omitempty"`
+	ProjectName        string         `json:"project_name,omitempty"`
 }
 
 func Search(ctx context.Context, db store.DBTX, projectID, tenantID uuid.UUID, queryEmbedding []float32, dimensions int, maxChunks int) ([]CandidateChunk, error) {

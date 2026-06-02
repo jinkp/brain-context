@@ -97,6 +97,8 @@ func main() {
 		err = runInvite(os.Args[2:])
 	case "join":
 		err = runJoin(os.Args[2:])
+	case "solution":
+		err = runSolution(os.Args[2:])
 	case "version":
 		fmt.Println("brain-context", version)
 		// Check for update in background
@@ -392,6 +394,10 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  brain projects rename --project <old> --name <new>  rename a project")
 	fmt.Fprintln(os.Stderr, "  brain scan           --project <name> [--stack <stack>]  preview which files would be indexed")
 	fmt.Fprintln(os.Stderr, "  brain mcp            [--project <name>]")
+	fmt.Fprintln(os.Stderr, "  brain solution create --name <n> --projects proj1,proj2,proj3")
+	fmt.Fprintln(os.Stderr, "  brain solution list")
+	fmt.Fprintln(os.Stderr, "  brain solution add   --solution <n> --project <proj>")
+	fmt.Fprintln(os.Stderr, "  brain solution remove --solution <n> --project <proj>")
 	fmt.Fprintln(os.Stderr, "  brain tui                       interactive TUI (wizard, client setup, update)")
 	fmt.Fprintln(os.Stderr, "  brain tui clients               TUI — client selection only")
 	fmt.Fprintln(os.Stderr, "  brain tui <client>              direct: opencode, claude, cursor, gemini, windsurf, all")
@@ -897,6 +903,240 @@ func runProjectsRename(args []string) error {
 	}
 
 	fmt.Printf("  ✅ %q → %q\n\n", strings.TrimSpace(*projectName), strings.TrimSpace(*newName))
+	return nil
+}
+
+// ── solution ──────────────────────────────────────────────────────────────────
+
+func runSolution(args []string) error {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage:")
+		fmt.Fprintln(os.Stderr, "  brain solution create --name <n> --projects proj1,proj2,proj3")
+		fmt.Fprintln(os.Stderr, "  brain solution list")
+		fmt.Fprintln(os.Stderr, "  brain solution add   --solution <n> --project <proj>")
+		fmt.Fprintln(os.Stderr, "  brain solution remove --solution <n> --project <proj>")
+		return fmt.Errorf("subcommand required: create, list, add, remove")
+	}
+	switch args[0] {
+	case "create":
+		return runSolutionCreate(args[1:])
+	case "list":
+		return runSolutionList()
+	case "add":
+		return runSolutionAdd(args[1:])
+	case "remove":
+		return runSolutionRemove(args[1:])
+	default:
+		return fmt.Errorf("unknown subcommand %q — use create, list, add, or remove", args[0])
+	}
+}
+
+func runSolutionCreate(args []string) error {
+	fs := flag.NewFlagSet("solution create", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	name := fs.String("name", "", "solution name")
+	projects := fs.String("projects", "", "comma-separated list of project names")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("parse flags: %w", err)
+	}
+	if strings.TrimSpace(*name) == "" {
+		return fmt.Errorf("--name is required")
+	}
+	if strings.TrimSpace(*projects) == "" {
+		return fmt.Errorf("--projects is required")
+	}
+
+	projectNames := make([]string, 0)
+	for _, p := range strings.Split(*projects, ",") {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			projectNames = append(projectNames, p)
+		}
+	}
+	if len(projectNames) < 2 {
+		return fmt.Errorf("solution must have at least 2 projects")
+	}
+
+	cfg, err := brainconfig.Load()
+	if err != nil {
+		return err
+	}
+
+	// Validate projects exist and are embedding-compatible
+	var referenceModel string
+	var referenceDims int
+	var referenceProjectName string
+	for _, projectName := range projectNames {
+		proj, ok := cfg.Projects[projectName]
+		if !ok {
+			return fmt.Errorf("project %q not found in local config — run `brain register` or `brain join` first", projectName)
+		}
+		if referenceModel == "" {
+			referenceModel = proj.EmbedModel
+			referenceDims = proj.EmbedDimensions
+			referenceProjectName = projectName
+			continue
+		}
+		if proj.EmbedModel != referenceModel {
+			return fmt.Errorf("embed model mismatch: project %q uses %s but project %q uses %s",
+				projectName, proj.EmbedModel, referenceProjectName, referenceModel)
+		}
+		if proj.EmbedDimensions != referenceDims {
+			return fmt.Errorf("embed dimensions mismatch: project %q uses %d but project %q uses %d",
+				projectName, proj.EmbedDimensions, referenceProjectName, referenceDims)
+		}
+	}
+
+	solutionName := strings.TrimSpace(*name)
+	if cfg.Solutions == nil {
+		cfg.Solutions = map[string]brainconfig.SolutionConfig{}
+	}
+	cfg.Solutions[solutionName] = brainconfig.SolutionConfig{Projects: projectNames}
+	if err := brainconfig.Save(cfg); err != nil {
+		return fmt.Errorf("save config: %w", err)
+	}
+
+	fmt.Printf("✅ Solution %q created with %d projects:\n", solutionName, len(projectNames))
+	for _, p := range projectNames {
+		fmt.Printf("   • %s\n", p)
+	}
+	return nil
+}
+
+func runSolutionList() error {
+	cfg, err := brainconfig.Load()
+	if err != nil {
+		return err
+	}
+
+	if len(cfg.Solutions) == 0 {
+		fmt.Println("No solutions configured. Run `brain solution create` to create one.")
+		return nil
+	}
+
+	fmt.Printf("Solutions (%d):\n\n", len(cfg.Solutions))
+	names := make([]string, 0, len(cfg.Solutions))
+	for name := range cfg.Solutions {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		solution := cfg.Solutions[name]
+		fmt.Printf("  %s\n", name)
+		for _, p := range solution.Projects {
+			fmt.Printf("    • %s\n", p)
+		}
+	}
+	fmt.Println()
+	return nil
+}
+
+func runSolutionAdd(args []string) error {
+	fs := flag.NewFlagSet("solution add", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	solutionName := fs.String("solution", "", "solution name")
+	projectName := fs.String("project", "", "project name to add")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("parse flags: %w", err)
+	}
+	if strings.TrimSpace(*solutionName) == "" {
+		return fmt.Errorf("--solution is required")
+	}
+	if strings.TrimSpace(*projectName) == "" {
+		return fmt.Errorf("--project is required")
+	}
+
+	cfg, err := brainconfig.Load()
+	if err != nil {
+		return err
+	}
+
+	solution, ok := cfg.Solutions[strings.TrimSpace(*solutionName)]
+	if !ok {
+		return fmt.Errorf("solution %q not found — run `brain solution create` first", strings.TrimSpace(*solutionName))
+	}
+
+	newProject, ok := cfg.Projects[strings.TrimSpace(*projectName)]
+	if !ok {
+		return fmt.Errorf("project %q not found in local config — run `brain register` or `brain join` first", strings.TrimSpace(*projectName))
+	}
+
+	// Validate embedding compatibility with existing solution members
+	if len(solution.Projects) > 0 {
+		firstMember := cfg.Projects[solution.Projects[0]]
+		if newProject.EmbedModel != firstMember.EmbedModel {
+			return fmt.Errorf("embed model mismatch: project %q uses %s but solution uses %s",
+				strings.TrimSpace(*projectName), newProject.EmbedModel, firstMember.EmbedModel)
+		}
+		if newProject.EmbedDimensions != firstMember.EmbedDimensions {
+			return fmt.Errorf("embed dimensions mismatch: project %q uses %d but solution uses %d",
+				strings.TrimSpace(*projectName), newProject.EmbedDimensions, firstMember.EmbedDimensions)
+		}
+	}
+
+	// Check not already in solution
+	for _, p := range solution.Projects {
+		if p == strings.TrimSpace(*projectName) {
+			return fmt.Errorf("project %q is already in solution %q", strings.TrimSpace(*projectName), strings.TrimSpace(*solutionName))
+		}
+	}
+
+	solution.Projects = append(solution.Projects, strings.TrimSpace(*projectName))
+	cfg.Solutions[strings.TrimSpace(*solutionName)] = solution
+	if err := brainconfig.Save(cfg); err != nil {
+		return fmt.Errorf("save config: %w", err)
+	}
+
+	fmt.Printf("✅ Added project %q to solution %q\n", strings.TrimSpace(*projectName), strings.TrimSpace(*solutionName))
+	return nil
+}
+
+func runSolutionRemove(args []string) error {
+	fs := flag.NewFlagSet("solution remove", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	solutionName := fs.String("solution", "", "solution name")
+	projectName := fs.String("project", "", "project name to remove")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("parse flags: %w", err)
+	}
+	if strings.TrimSpace(*solutionName) == "" {
+		return fmt.Errorf("--solution is required")
+	}
+	if strings.TrimSpace(*projectName) == "" {
+		return fmt.Errorf("--project is required")
+	}
+
+	cfg, err := brainconfig.Load()
+	if err != nil {
+		return err
+	}
+
+	solution, ok := cfg.Solutions[strings.TrimSpace(*solutionName)]
+	if !ok {
+		return fmt.Errorf("solution %q not found", strings.TrimSpace(*solutionName))
+	}
+
+	target := strings.TrimSpace(*projectName)
+	newProjects := make([]string, 0, len(solution.Projects))
+	found := false
+	for _, p := range solution.Projects {
+		if p == target {
+			found = true
+			continue
+		}
+		newProjects = append(newProjects, p)
+	}
+	if !found {
+		return fmt.Errorf("project %q is not in solution %q", target, strings.TrimSpace(*solutionName))
+	}
+
+	solution.Projects = newProjects
+	cfg.Solutions[strings.TrimSpace(*solutionName)] = solution
+	if err := brainconfig.Save(cfg); err != nil {
+		return fmt.Errorf("save config: %w", err)
+	}
+
+	fmt.Printf("✅ Removed project %q from solution %q\n", target, strings.TrimSpace(*solutionName))
 	return nil
 }
 

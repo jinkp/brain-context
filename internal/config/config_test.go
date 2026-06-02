@@ -224,3 +224,181 @@ func slicesEqual(a, b []string) bool {
 	}
 	return true
 }
+
+// ── Solution validation tests ─────────────────────────────────────────────────
+
+func makeTestProjects() map[string]ProjectConfig {
+	return map[string]ProjectConfig{
+		"pagos": {
+			ProjectID:       "proj-001",
+			EmbedModel:      "openai/text-embedding-3-large",
+			EmbedDimensions: 3072,
+		},
+		"portal": {
+			ProjectID:       "proj-002",
+			EmbedModel:      "openai/text-embedding-3-large",
+			EmbedDimensions: 3072,
+		},
+		"other": {
+			ProjectID:       "proj-003",
+			EmbedModel:      "ollama/nomic-embed-text",
+			EmbedDimensions: 768,
+		},
+		"other-dims": {
+			ProjectID:       "proj-004",
+			EmbedModel:      "openai/text-embedding-3-large",
+			EmbedDimensions: 1024,
+		},
+	}
+}
+
+func TestSolutionValidation_CompatibleProjects(t *testing.T) {
+	cfg := Config{
+		Projects: makeTestProjects(),
+		Solutions: map[string]SolutionConfig{
+			"mi-suite": {Projects: []string{"pagos", "portal"}},
+		},
+	}
+	if err := Validate(cfg); err != nil {
+		t.Errorf("expected no error for compatible projects, got: %v", err)
+	}
+}
+
+func TestSolutionValidation_IncompatibleModel(t *testing.T) {
+	cfg := Config{
+		Projects: makeTestProjects(),
+		Solutions: map[string]SolutionConfig{
+			"mi-suite": {Projects: []string{"pagos", "other"}},
+		},
+	}
+	err := Validate(cfg)
+	if err == nil {
+		t.Fatal("expected error for incompatible embed models, got nil")
+	}
+	if !strings.Contains(err.Error(), "embed model mismatch") {
+		t.Errorf("expected 'embed model mismatch' in error, got: %v", err)
+	}
+}
+
+func TestSolutionValidation_IncompatibleDimensions(t *testing.T) {
+	cfg := Config{
+		Projects: makeTestProjects(),
+		Solutions: map[string]SolutionConfig{
+			"mi-suite": {Projects: []string{"pagos", "other-dims"}},
+		},
+	}
+	err := Validate(cfg)
+	if err == nil {
+		t.Fatal("expected error for mismatched dimensions, got nil")
+	}
+	if !strings.Contains(err.Error(), "embed dimensions mismatch") {
+		t.Errorf("expected 'embed dimensions mismatch' in error, got: %v", err)
+	}
+}
+
+func TestSolutionValidation_UnknownProject(t *testing.T) {
+	cfg := Config{
+		Projects: makeTestProjects(),
+		Solutions: map[string]SolutionConfig{
+			"mi-suite": {Projects: []string{"pagos", "ghost-project"}},
+		},
+	}
+	err := Validate(cfg)
+	if err == nil {
+		t.Fatal("expected error for unknown project, got nil")
+	}
+	if !strings.Contains(err.Error(), "ghost-project") {
+		t.Errorf("expected project name in error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected 'not found' in error, got: %v", err)
+	}
+}
+
+func TestSolutionValidation_MinProjects(t *testing.T) {
+	cfg := Config{
+		Projects: makeTestProjects(),
+		Solutions: map[string]SolutionConfig{
+			"mi-suite": {Projects: []string{"pagos"}},
+		},
+	}
+	err := Validate(cfg)
+	if err == nil {
+		t.Fatal("expected error for single project, got nil")
+	}
+	if !strings.Contains(err.Error(), "at least 2") {
+		t.Errorf("expected 'at least 2' in error, got: %v", err)
+	}
+}
+
+func TestSolutionRoundTrip(t *testing.T) {
+	cfg := Config{
+		APIEndpoint: "https://api.example.com",
+		TenantToken: "tok-abc",
+		Projects: map[string]ProjectConfig{
+			"pagos": {
+				ProjectID:       "proj-001",
+				EmbedModel:      "openai/text-embedding-3-large",
+				EmbedDimensions: 3072,
+			},
+			"portal": {
+				ProjectID:       "proj-002",
+				EmbedModel:      "openai/text-embedding-3-large",
+				EmbedDimensions: 3072,
+			},
+		},
+		Solutions: map[string]SolutionConfig{
+			"mi-suite": {Projects: []string{"pagos", "portal"}},
+		},
+	}
+
+	// Marshal
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	// Unmarshal
+	var loaded Config
+	if err := yaml.Unmarshal(data, &loaded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	solution, ok := loaded.Solutions["mi-suite"]
+	if !ok {
+		t.Fatal("solution 'mi-suite' not found after round-trip")
+	}
+	if !slicesEqual(solution.Projects, []string{"pagos", "portal"}) {
+		t.Errorf("solution projects = %v, want [pagos portal]", solution.Projects)
+	}
+}
+
+func TestResolveSolution_Found(t *testing.T) {
+	cfg := Config{
+		Projects: makeTestProjects(),
+		Solutions: map[string]SolutionConfig{
+			"mi-suite": {Projects: []string{"pagos", "portal"}},
+		},
+	}
+	projects, err := cfg.ResolveSolution("mi-suite")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !slicesEqual(projects, []string{"pagos", "portal"}) {
+		t.Errorf("projects = %v, want [pagos portal]", projects)
+	}
+}
+
+func TestResolveSolution_NotFound(t *testing.T) {
+	cfg := Config{
+		Projects:  makeTestProjects(),
+		Solutions: map[string]SolutionConfig{},
+	}
+	_, err := cfg.ResolveSolution("ghost")
+	if err == nil {
+		t.Fatal("expected error for missing solution, got nil")
+	}
+	if !strings.Contains(err.Error(), "ghost") {
+		t.Errorf("expected solution name in error, got: %v", err)
+	}
+}

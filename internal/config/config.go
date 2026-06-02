@@ -16,12 +16,17 @@ var allowedDimensions = map[int]struct{}{
 	3072: {},
 }
 
+type SolutionConfig struct {
+	Projects []string `yaml:"projects"` // project names (keys in Config.Projects)
+}
+
 type Config struct {
-	APIEndpoint string                   `yaml:"api_endpoint"`
-	TenantToken string                   `yaml:"tenant_token"`
-	Exclude     []string                 `yaml:"exclude,omitempty"` // global dirs to exclude from all projects
-	Include     []string                 `yaml:"include,omitempty"` // global extra extensions for all projects
-	Projects    map[string]ProjectConfig `yaml:"projects"`
+	APIEndpoint string                     `yaml:"api_endpoint"`
+	TenantToken string                     `yaml:"tenant_token"`
+	Exclude     []string                   `yaml:"exclude,omitempty"` // global dirs to exclude from all projects
+	Include     []string                   `yaml:"include,omitempty"` // global extra extensions for all projects
+	Projects    map[string]ProjectConfig   `yaml:"projects"`
+	Solutions   map[string]SolutionConfig  `yaml:"solutions,omitempty"`
 }
 
 type ProjectConfig struct {
@@ -54,7 +59,10 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("create config directory: %w", err)
 	}
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-		cfg := Config{Projects: map[string]ProjectConfig{}}
+		cfg := Config{
+			Projects:  map[string]ProjectConfig{},
+			Solutions: map[string]SolutionConfig{},
+		}
 		if err := Save(cfg); err != nil {
 			return Config{}, err
 		}
@@ -113,6 +121,36 @@ func Validate(cfg Config) error {
 			return fmt.Errorf("project %q embed_dimensions must be one of 768, 1024, or 3072", name)
 		}
 	}
+
+	for solutionName, solution := range cfg.Solutions {
+		if len(solution.Projects) < 2 {
+			return fmt.Errorf("solution %q must have at least 2 projects", solutionName)
+		}
+		var referenceModel string
+		var referenceDims int
+		var referenceProjectName string
+		for _, projectName := range solution.Projects {
+			proj, ok := cfg.Projects[projectName]
+			if !ok {
+				return fmt.Errorf("solution %q: project %q not found", solutionName, projectName)
+			}
+			if referenceModel == "" {
+				referenceModel = proj.EmbedModel
+				referenceDims = proj.EmbedDimensions
+				referenceProjectName = projectName
+				continue
+			}
+			if proj.EmbedModel != referenceModel {
+				return fmt.Errorf("solution %q: embed model mismatch (project %q uses %s but project %q uses %s)",
+					solutionName, projectName, proj.EmbedModel, referenceProjectName, referenceModel)
+			}
+			if proj.EmbedDimensions != referenceDims {
+				return fmt.Errorf("solution %q: embed dimensions mismatch (project %q uses %d but project %q uses %d)",
+					solutionName, projectName, proj.EmbedDimensions, referenceProjectName, referenceDims)
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -121,9 +159,21 @@ func IsAllowedDimension(dim int) bool {
 	return ok
 }
 
+// ResolveSolution returns the project names for a solution, or an error if the solution is not found.
+func (cfg Config) ResolveSolution(name string) ([]string, error) {
+	solution, ok := cfg.Solutions[name]
+	if !ok {
+		return nil, fmt.Errorf("solution %q not found", name)
+	}
+	return solution.Projects, nil
+}
+
 func normalize(cfg *Config) {
 	if cfg.Projects == nil {
 		cfg.Projects = map[string]ProjectConfig{}
+	}
+	if cfg.Solutions == nil {
+		cfg.Solutions = map[string]SolutionConfig{}
 	}
 	cfg.APIEndpoint = strings.TrimRight(strings.TrimSpace(cfg.APIEndpoint), "/")
 	cfg.TenantToken = strings.TrimSpace(cfg.TenantToken)

@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	brainconfig "github.com/Gentleman-Programming/brain-context/internal/config"
@@ -59,6 +60,7 @@ type searchChunkResult struct {
 	Language      string                   `json:"language"`
 	Score         float64                  `json:"score"`
 	Relationships []retriever.Relationship `json:"relationships,omitempty"`
+	ProjectName   string                   `json:"project_name,omitempty"`
 }
 
 type fileSummaryResponse struct {
@@ -147,6 +149,16 @@ func findImpactTool() mcpgo.Tool {
 		mcpgo.WithDescription("Find all files and symbols impacted by modifying a given entity (class, function, table, service). Use this before making changes to understand the blast radius and avoid breaking dependent code."),
 		mcpgo.WithString("project_id", mcpgo.Required(), mcpgo.Description("Project ID or project name")),
 		mcpgo.WithString("entity", mcpgo.Required(), mcpgo.Description("Entity name, for example AuthService, Users table, PaymentController")),
+	)
+}
+
+func searchSolutionContextTool() mcpgo.Tool {
+	return mcpgo.NewTool("search_solution_context",
+		mcpgo.WithDescription("Search across all projects in a solution (multi-repo fan-out). Use when the query spans multiple services or when you need cross-project context."),
+		mcpgo.WithString("solution_name", mcpgo.Required(), mcpgo.Description("Name of the solution as registered with brain solution create")),
+		mcpgo.WithString("query", mcpgo.Required(), mcpgo.Description("Natural language search query")),
+		mcpgo.WithNumber("max_chunks", mcpgo.Description("Max chunks to return (default 20)")),
+		mcpgo.WithBoolean("include_relationships", mcpgo.Description("Include symbol relationships")),
 	)
 }
 
@@ -241,6 +253,196 @@ func (s *Server) handleFindImpact(ctx context.Context, req mcpgo.CallToolRequest
 	}
 
 	return textResult(formatImpact(response)), nil
+}
+
+func (s *Server) handleSearchSolutionContext(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	solutionName, err := requiredTrimmedString(req, "solution_name")
+	if err != nil {
+		return toolError(err), nil
+	}
+	query, err := requiredTrimmedString(req, "query")
+	if err != nil {
+		return toolError(err), nil
+	}
+	maxChunks := clampToolNumber(req.GetFloat("max_chunks", 20), 20, 50)
+	includeRelationships := req.GetBool("include_relationships", false)
+
+	// Resolve solution → list of project configs
+	projects, err := s.resolveSolution(solutionName)
+	if err != nil {
+		return toolError(err), nil
+	}
+
+	// Use first project to embed the query (all share same model — validated at creation)
+	firstProject := projects[0]
+	if strings.TrimSpace(firstProject.EmbedModel) == "" {
+		return toolError(fmt.Errorf("project embedder is not configured")), nil
+	}
+	if strings.TrimSpace(firstProject.EmbedAPIKey) == "" && !strings.HasPrefix(firstProject.EmbedModel, embedder.ProviderOllama+"/") {
+		return toolError(fmt.Errorf("project embedder api key is not configured")), nil
+	}
+	emb, err := embedder.New(firstProject.EmbedModel, firstProject.EmbedAPIKey)
+	if err != nil {
+		return toolError(fmt.Errorf("create embedder: %w", err)), nil
+	}
+	vectors, err := emb.Embed(ctx, []string{query})
+	if err != nil {
+		return toolError(fmt.Errorf("embed query: %w", err)), nil
+	}
+	if len(vectors) == 0 {
+		return toolError(fmt.Errorf("embed query: no vector returned")), nil
+	}
+	queryEmbedding := vectors[0]
+
+	// Per-project candidate cap: max(10, 50/N)
+	n := len(projects)
+	perProjectCap := 50 / n
+	if perProjectCap < 10 {
+		perProjectCap = 10
+	}
+
+	// Fan-out: search each project in parallel
+	type projectResult struct {
+		chunks  []searchChunkResult
+		warning string
+	}
+
+	results := make([]projectResult, n)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	for i, proj := range projects {
+		wg.Add(1)
+		go func(idx int, project brainconfig.ProjectConfig) {
+			defer wg.Done()
+
+			if strings.TrimSpace(project.MCPReadKey) == "" {
+				mu.Lock()
+				results[idx] = projectResult{warning: fmt.Sprintf("%s: no mcp_read_key configured (skipped)", project.ProjectID)}
+				mu.Unlock()
+				return
+			}
+
+			payload := searchRequest{
+				QueryEmbedding:       queryEmbedding,
+				QueryTSV:             query,
+				MaxChunks:            perProjectCap,
+				IncludeRelationships: includeRelationships,
+			}
+			endpoint := fmt.Sprintf("%s/api/projects/%s/context/search", s.apiEndpoint, strings.TrimSpace(project.ProjectID))
+			var resp searchResponse
+			if err := s.doJSON(ctx, http.MethodPost, endpoint, project.MCPReadKey, payload, &resp); err != nil {
+				mu.Lock()
+				results[idx] = projectResult{warning: fmt.Sprintf("%s: %v", project.ProjectID, err)}
+				mu.Unlock()
+				return
+			}
+
+			// Tag chunks with project name
+			projectName := s.projectName(project.ProjectID)
+			chunks := make([]searchChunkResult, len(resp.Chunks))
+			for j, c := range resp.Chunks {
+				chunks[j] = c
+				chunks[j].ProjectName = projectName
+			}
+			mu.Lock()
+			results[idx] = projectResult{chunks: chunks}
+			mu.Unlock()
+		}(i, proj)
+	}
+	wg.Wait()
+
+	// Merge results
+	var allChunks []searchChunkResult
+	var warnings []string
+	for _, r := range results {
+		allChunks = append(allChunks, r.chunks...)
+		if r.warning != "" {
+			warnings = append(warnings, r.warning)
+		}
+	}
+
+	if len(allChunks) == 0 && len(warnings) == len(projects) {
+		return toolError(fmt.Errorf("all projects in solution %q failed: %s", solutionName, strings.Join(warnings, "; "))), nil
+	}
+
+	// Sort by score descending, take top maxChunks
+	sort.Slice(allChunks, func(i, j int) bool {
+		return allChunks[i].Score > allChunks[j].Score
+	})
+	if len(allChunks) > maxChunks {
+		allChunks = allChunks[:maxChunks]
+	}
+
+	result := formatSolutionResults(solutionName, query, allChunks, len(projects), warnings)
+	return textResult(result), nil
+}
+
+// resolveSolution looks up a solution by name and returns member project configs.
+// Projects without MCPReadKey are included (caller handles skip logic).
+func (s *Server) resolveSolution(name string) ([]brainconfig.ProjectConfig, error) {
+	solution, ok := s.solutionsByName[strings.ToLower(name)]
+	if !ok {
+		return nil, fmt.Errorf("solution %q not found — run 'brain solution create' to create one", name)
+	}
+	if len(solution.Projects) == 0 {
+		return nil, fmt.Errorf("solution %q has no member projects", name)
+	}
+	projects := make([]brainconfig.ProjectConfig, 0, len(solution.Projects))
+	for _, projectName := range solution.Projects {
+		if id, ok := s.projectsByName[strings.ToLower(projectName)]; ok {
+			if proj, ok := s.projectsByID[id]; ok {
+				projects = append(projects, proj)
+				continue
+			}
+		}
+		// Project in solution not found in projectsByID — skip with log but don't hard fail here
+		projects = append(projects, brainconfig.ProjectConfig{ProjectID: projectName})
+	}
+	if len(projects) == 0 {
+		return nil, fmt.Errorf("solution %q: no member projects could be resolved", name)
+	}
+	return projects, nil
+}
+
+// projectName returns the human-readable name for a project ID.
+func (s *Server) projectName(projectID string) string {
+	for name, id := range s.projectsByName {
+		if id == projectID {
+			return name
+		}
+	}
+	return projectID
+}
+
+func formatSolutionResults(solutionName, query string, chunks []searchChunkResult, totalProjects int, warnings []string) string {
+	var builder strings.Builder
+	builder.WriteString(fmt.Sprintf("## Solution Context for: %q (solution: %s, %d projects)\n", query, solutionName, totalProjects))
+	if len(chunks) == 0 {
+		builder.WriteString("\nNo relevant context found.")
+	} else {
+		for _, chunk := range chunks {
+			builder.WriteString("\n")
+			projectLabel := ""
+			if chunk.ProjectName != "" {
+				projectLabel = fmt.Sprintf(" [Project: %s]", chunk.ProjectName)
+			}
+			builder.WriteString(fmt.Sprintf("\n### %s — %s (%s, lines %d-%d)%s\n",
+				chunk.FilePath, displaySymbolName(chunk.SymbolName), displaySymbolType(chunk.SymbolType),
+				chunk.StartLine, chunk.EndLine, projectLabel))
+			builder.WriteString(fmt.Sprintf("Score: %.2f\n", chunk.Score))
+			if len(chunk.Relationships) > 0 {
+				builder.WriteString("Relationships: " + formatRelationships(chunk.Relationships) + "\n")
+			}
+		}
+	}
+	if len(warnings) > 0 {
+		builder.WriteString("\n\n### Warnings\n")
+		for _, w := range warnings {
+			builder.WriteString("- " + w + "\n")
+		}
+	}
+	return builder.String()
 }
 
 func (s *Server) searchContext(ctx context.Context, projectID string, project brainconfig.ProjectConfig, query string, maxChunks int, includeRelationships bool) (string, error) {

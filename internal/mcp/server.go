@@ -24,6 +24,7 @@ type Server struct {
 	globalInclude    []string // from config top-level
 	projectsByID     map[string]brainconfig.ProjectConfig
 	projectsByName   map[string]string // name → project_id
+	solutionsByName  map[string]brainconfig.SolutionConfig // lowercase name → SolutionConfig
 	httpClient       *http.Client
 }
 
@@ -45,13 +46,19 @@ func New(defaultProjectName string) (*Server, error) {
 		}
 	}
 
+	solutionsByName := make(map[string]brainconfig.SolutionConfig, len(cfg.Solutions))
+	for name, solution := range cfg.Solutions {
+		solutionsByName[strings.ToLower(strings.TrimSpace(name))] = solution
+	}
+
 	srv := &Server{
-		apiEndpoint:    strings.TrimRight(strings.TrimSpace(cfg.APIEndpoint), "/"),
-		globalExclude:  cfg.Exclude,
-		globalInclude:  cfg.Include,
-		projectsByID:   projectsByID,
-		projectsByName: projectsByName,
-		httpClient:     &http.Client{Timeout: 30 * time.Second},
+		apiEndpoint:     strings.TrimRight(strings.TrimSpace(cfg.APIEndpoint), "/"),
+		globalExclude:   cfg.Exclude,
+		globalInclude:   cfg.Include,
+		projectsByID:    projectsByID,
+		projectsByName:  projectsByName,
+		solutionsByName: solutionsByName,
+		httpClient:      &http.Client{Timeout: 30 * time.Second},
 	}
 	if strings.TrimSpace(defaultProjectName) != "" {
 		project, ok := cfg.Projects[strings.TrimSpace(defaultProjectName)]
@@ -97,6 +104,7 @@ func (s *Server) registerTools(mcpServer *server.MCPServer) {
 	mcpServer.AddTool(explainFlowTool(), s.handleExplainFlow)
 	mcpServer.AddTool(findImpactTool(), s.handleFindImpact)
 	mcpServer.AddTool(previewScanTool(), s.handlePreviewScan)
+	mcpServer.AddTool(searchSolutionContextTool(), s.handleSearchSolutionContext)
 }
 
 func (s *Server) listProjectNames() string {
