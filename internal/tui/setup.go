@@ -4,10 +4,38 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/Gentleman-Programming/brain-context/internal/config"
+)
+
+// claudeCodeMarketplace is the GitHub owner/repo used by
+// `claude plugin marketplace add`.
+const claudeCodeMarketplace = "jinkp/brain-context"
+
+// claudeCodeMCPTools lists every tool exposed by the brain-context MCP server.
+// Adding these to ~/.claude/settings.json permissions.allow prevents Claude Code
+// from prompting the user for confirmation on each tool call.
+// Pattern: mcp__plugin_{marketplace}_{plugin}__{tool}
+// Both marketplace and plugin are "brain-context" → normalized to "brain_context".
+var claudeCodeMCPTools = []string{
+	"mcp__plugin_brain_context_brain_context__search_project_context",
+	"mcp__plugin_brain_context_brain_context__get_file_summary",
+	"mcp__plugin_brain_context_brain_context__get_related_files",
+	"mcp__plugin_brain_context_brain_context__explain_flow",
+	"mcp__plugin_brain_context_brain_context__find_impact",
+	"mcp__plugin_brain_context_brain_context__preview_scan",
+	"mcp__plugin_brain_context_brain_context__search_solution_context",
+}
+
+// Testable function vars — override in tests to avoid real exec calls.
+var (
+	lookPathFn = exec.LookPath
+	runCmdFn   = func(name string, args ...string) ([]byte, error) {
+		return exec.Command(name, args...).CombinedOutput()
+	}
 )
 
 // setupClient configures the MCP entry for the given client.
@@ -86,17 +114,84 @@ func claudeDotPath(home string) string {
 	return filepath.Join(home, ".claude.json")
 }
 
-// setupClaude configures Claude Code at user scope: writes to ~/.claude.json
-// (the canonical MCP target per official docs), injects the protocol into
-// ~/.claude/CLAUDE.md, and migrates any stale entry from ~/.claude/settings.json.
+// setupClaude configures Claude Code as a native plugin via the marketplace
+// system. This gives brain-context first-class plugin status with hooks, skills,
+// and MCP tools — the same way Engram registers itself.
+//
+// Steps:
+//  1. `claude plugin marketplace add jinkp/brain-context`
+//  2. `claude plugin install brain-context`
+//  3. Write a durable MCP fallback to ~/.claude/mcp/brain-context.json
+//     (survives plugin cache updates; critical on Windows where PATH may not
+//     propagate to MCP subprocesses)
+//  4. Add tool permissions to ~/.claude/settings.json allowlist
+//  5. Best-effort migration of stale entries from old locations
+//  6. Inject protocol into ~/.claude/CLAUDE.md
 func setupClaude(home, brainExe string) error {
-	// 1. Merge MCP entry into ~/.claude.json
+	// 1. Add marketplace — requires `claude` CLI in PATH
+	claudeBin, err := lookPathFn("claude")
+	if err != nil {
+		// Fallback: if claude CLI is not available, use the legacy direct MCP approach
+		fmt.Fprintf(os.Stderr, "  claude CLI not found — falling back to direct MCP registration\n")
+		return setupClaudeLegacy(home, brainExe)
+	}
+
+	addOut, err := runCmdFn(claudeBin, "plugin", "marketplace", "add", claudeCodeMarketplace)
+	addOutputStr := strings.TrimSpace(string(addOut))
+	if err != nil {
+		// "already" means marketplace was previously added — that's fine
+		if !strings.Contains(strings.ToLower(addOutputStr), "already") {
+			fmt.Fprintf(os.Stderr, "  marketplace add failed: %s — falling back to direct MCP\n", addOutputStr)
+			return setupClaudeLegacy(home, brainExe)
+		}
+	}
+
+	// 2. Install the plugin
+	installOut, err := runCmdFn(claudeBin, "plugin", "install", "brain-context")
+	installOutputStr := strings.TrimSpace(string(installOut))
+	if err != nil {
+		if !strings.Contains(strings.ToLower(installOutputStr), "already") {
+			fmt.Fprintf(os.Stderr, "  plugin install failed: %s — falling back to direct MCP\n", installOutputStr)
+			return setupClaudeLegacy(home, brainExe)
+		}
+	}
+
+	// 3. Write durable user-level MCP config at ~/.claude/mcp/brain-context.json
+	//    This uses the absolute binary path so MCP subprocesses don't need PATH.
+	if err := writeClaudeUserMCP(home, brainExe); err != nil {
+		fmt.Fprintf(os.Stderr, "  warning: could not write user MCP config: %v\n", err)
+		fmt.Fprintf(os.Stderr, "  The plugin is installed but MCP may not start on Windows if brain is not in PATH.\n")
+	}
+
+	// 4. Add tool permissions to allowlist
+	if err := addClaudeAllowlist(home); err != nil {
+		fmt.Fprintf(os.Stderr, "  warning: could not update allowlist: %v\n", err)
+	}
+
+	// 5. Best-effort migration: remove stale entry from old locations
+	if err := migrateOldSettings(home); err != nil {
+		fmt.Fprintf(os.Stderr, "  settings.json migration skipped: %v\n", err)
+	}
+	// Also remove the direct MCP entry from ~/.claude.json (now handled by plugin)
+	migrateClaudeDotJSON(home)
+
+	// 6. Inject protocol into ~/.claude/CLAUDE.md
+	claudeMD := filepath.Join(home, ".claude", "CLAUDE.md")
+	if err := injectProtocolIntoFile(claudeMD); err != nil {
+		fmt.Fprintf(os.Stderr, "  protocol injection skipped: %v\n", err)
+	}
+
+	return nil
+}
+
+// setupClaudeLegacy is the fallback when `claude` CLI is not available.
+// It writes the MCP entry directly to ~/.claude.json (the pre-plugin approach).
+func setupClaudeLegacy(home, brainExe string) error {
 	clodotPath := claudeDotPath(home)
 
 	cfg, err := readJSONMap(clodotPath)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			// File exists but is invalid JSON — abort without writing
 			return fmt.Errorf("read %s: %w", clodotPath, err)
 		}
 		cfg = map[string]any{}
@@ -114,14 +209,149 @@ func setupClaude(home, brainExe string) error {
 		return err
 	}
 
-	// 2. Best-effort migration: remove stale entry from ~/.claude/settings.json
 	if err := migrateOldSettings(home); err != nil {
-		fmt.Fprintf(os.Stderr, "  ⚠️  settings.json migration skipped: %v\n", err)
+		fmt.Fprintf(os.Stderr, "  settings.json migration skipped: %v\n", err)
 	}
 
-	// 3. Inject protocol into ~/.claude/CLAUDE.md
 	claudeMD := filepath.Join(home, ".claude", "CLAUDE.md")
 	return injectProtocolIntoFile(claudeMD)
+}
+
+// writeClaudeUserMCP writes ~/.claude/mcp/brain-context.json with the absolute
+// path to the brain binary. This is a durable MCP config that survives plugin
+// cache auto-updates and works on Windows where PATH may not propagate to MCP
+// subprocesses.
+func writeClaudeUserMCP(home, brainExe string) error {
+	// Resolve symlinks so the path is stable across package manager updates
+	if resolved, err := filepath.EvalSymlinks(brainExe); err == nil {
+		brainExe = resolved
+	}
+
+	entry := map[string]any{
+		"command": brainExe,
+		"args":    []string{"mcp"},
+	}
+	data, err := json.MarshalIndent(entry, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal mcp config: %w", err)
+	}
+
+	mcpDir := filepath.Join(home, ".claude", "mcp")
+	if err := os.MkdirAll(mcpDir, 0755); err != nil {
+		return fmt.Errorf("create mcp dir: %w", err)
+	}
+
+	mcpPath := filepath.Join(mcpDir, "brain-context.json")
+	return os.WriteFile(mcpPath, data, 0644)
+}
+
+// addClaudeAllowlist adds brain-context MCP tool names to
+// ~/.claude/settings.json permissions.allow so Claude Code doesn't prompt
+// for confirmation on each tool call. Idempotent: skips tools already present.
+func addClaudeAllowlist(home string) error {
+	settingsPath := filepath.Join(home, ".claude", "settings.json")
+
+	var cfg map[string]json.RawMessage
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			cfg = make(map[string]json.RawMessage)
+		} else {
+			return fmt.Errorf("read settings: %w", err)
+		}
+	} else {
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return fmt.Errorf("parse settings: %w", err)
+		}
+	}
+
+	// Parse or create permissions block
+	var permissions map[string]json.RawMessage
+	if raw, exists := cfg["permissions"]; exists {
+		if err := json.Unmarshal(raw, &permissions); err != nil {
+			return fmt.Errorf("parse permissions: %w", err)
+		}
+	} else {
+		permissions = make(map[string]json.RawMessage)
+	}
+
+	// Parse or create allow list
+	var allowList []string
+	if raw, exists := permissions["allow"]; exists {
+		if err := json.Unmarshal(raw, &allowList); err != nil {
+			return fmt.Errorf("parse allow list: %w", err)
+		}
+	}
+
+	// Build set of existing entries for O(1) lookup
+	existing := make(map[string]bool, len(allowList))
+	for _, entry := range allowList {
+		existing[entry] = true
+	}
+
+	// Add only missing tools
+	added := 0
+	for _, tool := range claudeCodeMCPTools {
+		if !existing[tool] {
+			allowList = append(allowList, tool)
+			added++
+		}
+	}
+
+	if added == 0 {
+		return nil // all tools already present
+	}
+
+	// Write back
+	allowData, err := json.Marshal(allowList)
+	if err != nil {
+		return fmt.Errorf("marshal allow list: %w", err)
+	}
+	permissions["allow"] = allowData
+
+	permData, err := json.Marshal(permissions)
+	if err != nil {
+		return fmt.Errorf("marshal permissions: %w", err)
+	}
+	cfg["permissions"] = permData
+
+	out, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal settings: %w", err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0755); err != nil {
+		return fmt.Errorf("create settings dir: %w", err)
+	}
+	return os.WriteFile(settingsPath, out, 0644)
+}
+
+// migrateClaudeDotJSON removes the direct brain-context MCP entry from
+// ~/.claude.json if present. Now that brain-context is a plugin, the MCP
+// server is managed by the plugin system + the durable ~/.claude/mcp/ fallback.
+func migrateClaudeDotJSON(home string) {
+	clodotPath := claudeDotPath(home)
+	cfg, err := readJSONMap(clodotPath)
+	if err != nil {
+		return
+	}
+
+	mcpServers, ok := cfg["mcpServers"].(map[string]any)
+	if !ok {
+		return
+	}
+	if _, has := mcpServers["brain-context"]; !has {
+		return
+	}
+
+	delete(mcpServers, "brain-context")
+	// If mcpServers is now empty, remove the key entirely
+	if len(mcpServers) == 0 {
+		delete(cfg, "mcpServers")
+	} else {
+		cfg["mcpServers"] = mcpServers
+	}
+	_ = writeJSONMap(clodotPath, cfg)
 }
 
 // migrateOldSettings removes the brain-context entry from ~/.claude/settings.json

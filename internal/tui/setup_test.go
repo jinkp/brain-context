@@ -2,8 +2,10 @@ package tui
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Gentleman-Programming/brain-context/internal/config"
@@ -50,16 +52,16 @@ func mcpEntry(m map[string]any) map[string]any {
 	return entry
 }
 
-// ── setupClaude tests ─────────────────────────────────────────────────────────
+// ── setupClaudeLegacy tests (fallback when claude CLI is absent) ──────────────
 
-// TestSetupClaude_CreatesClaudeJSON verifies that setupClaude creates
+// TestSetupClaudeLegacy_CreatesClaudeJSON verifies that setupClaudeLegacy creates
 // ~/.claude.json from scratch with the correct structure when the file is absent.
-func TestSetupClaude_CreatesClaudeJSON(t *testing.T) {
+func TestSetupClaudeLegacy_CreatesClaudeJSON(t *testing.T) {
 	home := t.TempDir()
 	brainExe := "/usr/local/bin/brain"
 
-	if err := setupClaude(home, brainExe); err != nil {
-		t.Fatalf("setupClaude: %v", err)
+	if err := setupClaudeLegacy(home, brainExe); err != nil {
+		t.Fatalf("setupClaudeLegacy: %v", err)
 	}
 
 	clodotPath := filepath.Join(home, ".claude.json")
@@ -84,9 +86,9 @@ func TestSetupClaude_CreatesClaudeJSON(t *testing.T) {
 	}
 }
 
-// TestSetupClaude_MergesExistingClaudeJSON verifies that setupClaude merges
-// into an existing ~/.claude.json without clobbering pre-existing keys.
-func TestSetupClaude_MergesExistingClaudeJSON(t *testing.T) {
+// TestSetupClaudeLegacy_MergesExistingClaudeJSON verifies that setupClaudeLegacy
+// merges into an existing ~/.claude.json without clobbering pre-existing keys.
+func TestSetupClaudeLegacy_MergesExistingClaudeJSON(t *testing.T) {
 	home := t.TempDir()
 	brainExe := "/usr/local/bin/brain"
 
@@ -97,8 +99,8 @@ func TestSetupClaude_MergesExistingClaudeJSON(t *testing.T) {
 	}
 	writeJSON(t, filepath.Join(home, ".claude.json"), existing)
 
-	if err := setupClaude(home, brainExe); err != nil {
-		t.Fatalf("setupClaude: %v", err)
+	if err := setupClaudeLegacy(home, brainExe); err != nil {
+		t.Fatalf("setupClaudeLegacy: %v", err)
 	}
 
 	cfg := readJSONFile(t, filepath.Join(home, ".claude.json"))
@@ -124,9 +126,9 @@ func TestSetupClaude_MergesExistingClaudeJSON(t *testing.T) {
 	}
 }
 
-// TestSetupClaude_InvalidJSONAborts verifies that setupClaude returns an error
-// and does NOT overwrite the file when ~/.claude.json contains invalid JSON.
-func TestSetupClaude_InvalidJSONAborts(t *testing.T) {
+// TestSetupClaudeLegacy_InvalidJSONAborts verifies that setupClaudeLegacy returns
+// an error and does NOT overwrite the file when ~/.claude.json contains invalid JSON.
+func TestSetupClaudeLegacy_InvalidJSONAborts(t *testing.T) {
 	home := t.TempDir()
 	brainExe := "/usr/local/bin/brain"
 
@@ -136,7 +138,7 @@ func TestSetupClaude_InvalidJSONAborts(t *testing.T) {
 		t.Fatalf("write corrupt file: %v", err)
 	}
 
-	err := setupClaude(home, brainExe)
+	err := setupClaudeLegacy(home, brainExe)
 	if err == nil {
 		t.Fatal("expected error for corrupt JSON, got nil")
 	}
@@ -151,12 +153,130 @@ func TestSetupClaude_InvalidJSONAborts(t *testing.T) {
 	}
 }
 
+// TestSetupClaude_FallsBackToLegacy verifies that setupClaude falls back
+// to the legacy direct-MCP approach when `claude` CLI is not in PATH.
+func TestSetupClaude_FallsBackToLegacy(t *testing.T) {
+	home := t.TempDir()
+	brainExe := "/usr/local/bin/brain"
+
+	// Mock lookPathFn to simulate claude CLI not being available
+	origLookPath := lookPathFn
+	lookPathFn = func(file string) (string, error) {
+		return "", fmt.Errorf("not found")
+	}
+	defer func() { lookPathFn = origLookPath }()
+
+	if err := setupClaude(home, brainExe); err != nil {
+		t.Fatalf("setupClaude: %v", err)
+	}
+
+	// Should have written to ~/.claude.json via legacy path
+	clodotPath := filepath.Join(home, ".claude.json")
+	cfg := readJSONFile(t, clodotPath)
+	entry := mcpEntry(cfg)
+	if entry == nil {
+		t.Fatal("mcpServers[\"brain-context\"] not found — legacy fallback did not write")
+	}
+	if entry["type"] != "stdio" {
+		t.Errorf("expected type=stdio, got %v", entry["type"])
+	}
+}
+
+// TestSetupClaude_PluginPath verifies the full plugin installation path
+// when `claude` CLI is available and marketplace/install commands succeed.
+func TestSetupClaude_PluginPath(t *testing.T) {
+	home := t.TempDir()
+	brainExe := filepath.Join(home, "brain")
+
+	// Create the brain binary file so EvalSymlinks works
+	if err := os.WriteFile(brainExe, []byte("fake"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Track which commands were called
+	var cmdsRun []string
+
+	origLookPath := lookPathFn
+	origRunCmd := runCmdFn
+	lookPathFn = func(file string) (string, error) {
+		if file == "claude" {
+			return "/usr/local/bin/claude", nil
+		}
+		return "", fmt.Errorf("not found")
+	}
+	runCmdFn = func(name string, args ...string) ([]byte, error) {
+		cmd := name + " " + strings.Join(args, " ")
+		cmdsRun = append(cmdsRun, cmd)
+		return []byte("ok"), nil
+	}
+	defer func() {
+		lookPathFn = origLookPath
+		runCmdFn = origRunCmd
+	}()
+
+	if err := setupClaude(home, brainExe); err != nil {
+		t.Fatalf("setupClaude: %v", err)
+	}
+
+	// Verify marketplace add was called
+	if len(cmdsRun) < 1 {
+		t.Fatal("expected marketplace add command to be called")
+	}
+	if !strings.Contains(cmdsRun[0], "marketplace add") {
+		t.Errorf("first command should be marketplace add, got: %s", cmdsRun[0])
+	}
+	if !strings.Contains(cmdsRun[0], claudeCodeMarketplace) {
+		t.Errorf("marketplace add should reference %s, got: %s", claudeCodeMarketplace, cmdsRun[0])
+	}
+
+	// Verify plugin install was called
+	if len(cmdsRun) < 2 {
+		t.Fatal("expected plugin install command to be called")
+	}
+	if !strings.Contains(cmdsRun[1], "plugin install") {
+		t.Errorf("second command should be plugin install, got: %s", cmdsRun[1])
+	}
+
+	// Verify durable MCP config was written
+	mcpPath := filepath.Join(home, ".claude", "mcp", "brain-context.json")
+	if _, err := os.Stat(mcpPath); os.IsNotExist(err) {
+		t.Fatal("~/.claude/mcp/brain-context.json was not created")
+	}
+	mcpCfg := readJSONFile(t, mcpPath)
+	if mcpCfg["command"] == nil {
+		t.Error("durable MCP config missing command field")
+	}
+
+	// Verify allowlist was written to settings.json
+	settingsPath := filepath.Join(home, ".claude", "settings.json")
+	if _, err := os.Stat(settingsPath); os.IsNotExist(err) {
+		t.Fatal("~/.claude/settings.json was not created for allowlist")
+	}
+
+	// Verify direct MCP entry was NOT written to ~/.claude.json
+	// (plugin path should not create a direct entry)
+	clodotPath := filepath.Join(home, ".claude.json")
+	if _, err := os.Stat(clodotPath); err == nil {
+		cfg := readJSONFile(t, clodotPath)
+		if mcpEntry(cfg) != nil {
+			t.Error("direct MCP entry should NOT exist in ~/.claude.json when using plugin path")
+		}
+	}
+}
+
 // TestSetupClaude_MigratesSettingsJSON verifies that a stale brain-context entry
 // is removed from ~/.claude/settings.json after setupClaude succeeds, while
 // other keys in settings.json are preserved.
 func TestSetupClaude_MigratesSettingsJSON(t *testing.T) {
 	home := t.TempDir()
 	brainExe := "/usr/local/bin/brain"
+
+	// Use legacy path so the test focuses on migration behavior
+	origLookPath := lookPathFn
+	lookPathFn = func(file string) (string, error) {
+		return "", fmt.Errorf("not found")
+	}
+	defer func() { lookPathFn = origLookPath }()
 
 	settingsPath := filepath.Join(home, ".claude", "settings.json")
 	staleSettings := map[string]any{
@@ -193,6 +313,81 @@ func TestSetupClaude_MigratesSettingsJSON(t *testing.T) {
 	// other top-level keys must be preserved
 	if settings["theme"] != "dark" {
 		t.Errorf("theme key was clobbered, got %v", settings["theme"])
+	}
+}
+
+// TestAddClaudeAllowlist verifies that addClaudeAllowlist adds all brain-context
+// tool names to the permissions.allow list, is idempotent, and preserves existing entries.
+func TestAddClaudeAllowlist(t *testing.T) {
+	home := t.TempDir()
+
+	// First call — creates settings.json from scratch
+	if err := addClaudeAllowlist(home); err != nil {
+		t.Fatalf("first addClaudeAllowlist: %v", err)
+	}
+
+	settingsPath := filepath.Join(home, ".claude", "settings.json")
+	settings := readJSONFile(t, settingsPath)
+	perms, _ := settings["permissions"].(map[string]any)
+	allowRaw, _ := perms["allow"].([]any)
+
+	if len(allowRaw) != len(claudeCodeMCPTools) {
+		t.Errorf("expected %d tools in allowlist, got %d", len(claudeCodeMCPTools), len(allowRaw))
+	}
+
+	// Second call — should be idempotent
+	if err := addClaudeAllowlist(home); err != nil {
+		t.Fatalf("second addClaudeAllowlist: %v", err)
+	}
+
+	settings2 := readJSONFile(t, settingsPath)
+	perms2, _ := settings2["permissions"].(map[string]any)
+	allow2, _ := perms2["allow"].([]any)
+
+	if len(allow2) != len(claudeCodeMCPTools) {
+		t.Errorf("expected %d tools after idempotent call, got %d", len(claudeCodeMCPTools), len(allow2))
+	}
+}
+
+// TestMigrateClaudeDotJSON verifies that migrateClaudeDotJSON removes the
+// direct brain-context entry from ~/.claude.json while preserving other keys.
+func TestMigrateClaudeDotJSON(t *testing.T) {
+	home := t.TempDir()
+	clodotPath := filepath.Join(home, ".claude.json")
+
+	existing := map[string]any{
+		"primaryApiKey": "sk-abc123",
+		"mcpServers": map[string]any{
+			"brain-context": map[string]any{
+				"type":    "stdio",
+				"command": "/usr/local/bin/brain",
+				"args":    []any{"mcp"},
+			},
+			"other-server": map[string]any{
+				"command": "other",
+			},
+		},
+	}
+	writeJSON(t, clodotPath, existing)
+
+	migrateClaudeDotJSON(home)
+
+	cfg := readJSONFile(t, clodotPath)
+
+	// brain-context must be removed
+	servers, _ := cfg["mcpServers"].(map[string]any)
+	if _, exists := servers["brain-context"]; exists {
+		t.Error("brain-context was NOT removed from ~/.claude.json")
+	}
+
+	// other-server must remain
+	if _, exists := servers["other-server"]; !exists {
+		t.Error("other-server was unexpectedly removed")
+	}
+
+	// other keys preserved
+	if cfg["primaryApiKey"] != "sk-abc123" {
+		t.Error("primaryApiKey was clobbered")
 	}
 }
 
