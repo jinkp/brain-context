@@ -604,6 +604,10 @@ func runMetrics(args []string) error {
 		to = *toStr
 	}
 
+	if from > to {
+		return fmt.Errorf("invalid range: --from (%s) is after --to (%s)", from, to)
+	}
+
 	cfg, err := brainconfig.Load()
 	if err != nil {
 		return err
