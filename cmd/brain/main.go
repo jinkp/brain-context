@@ -30,7 +30,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-var version = "v0.6.0" // overridden by -ldflags at build time
+var version = "v0.6.1" // overridden by -ldflags at build time
 
 var httpClient = &http.Client{Timeout: 30 * time.Second}
 
