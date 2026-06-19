@@ -62,6 +62,15 @@ type MetricsSummary struct {
 	SavingsPercent        float64        `json:"savings_percent"`
 	QueriesByDay          []DayBucket    `json:"queries_by_day"`
 	QueriesByProject      []ProjectBucket `json:"queries_by_project"`
+
+	// Extended metrics (computed from existing schema)
+	QueriesByActor    []ActorBucket    `json:"queries_by_actor"`
+	QueriesByHour     []HourBucket     `json:"queries_by_hour"`
+	ScoreDistribution ScoreDist        `json:"score_distribution"`
+	HitRatio          float64          `json:"hit_ratio"`
+	TokensPerQuery    float64          `json:"tokens_per_query"`
+	CodebaseStats     []ProjectStats   `json:"codebase_stats"`
+	IndexJobs         []IndexJobStats  `json:"index_jobs"`
 }
 
 type DayBucket struct {
@@ -74,6 +83,43 @@ type ProjectBucket struct {
 	ProjectName string  `json:"project_name"`
 	Queries     int64   `json:"queries"`
 	AvgScore    float64 `json:"avg_score"`
+}
+
+type ActorBucket struct {
+	ActorPrefix string `json:"actor_prefix"`
+	Queries     int64  `json:"queries"`
+	AvgScore    float64 `json:"avg_score"`
+}
+
+type HourBucket struct {
+	Hour    int   `json:"hour"`
+	Queries int64 `json:"queries"`
+}
+
+type ScoreDist struct {
+	Excellent int64 `json:"excellent"` // >= 0.7
+	Good      int64 `json:"good"`      // 0.4–0.7
+	Poor      int64 `json:"poor"`      // < 0.4
+}
+
+type ProjectStats struct {
+	ProjectID   string `json:"project_id"`
+	ProjectName string `json:"project_name"`
+	TotalFiles  int64  `json:"total_files"`
+	TotalChunks int64  `json:"total_chunks"`
+	TotalSizeKB int64  `json:"total_size_kb"`
+	Languages   int64  `json:"languages"`
+	TopLanguage string `json:"top_language"`
+	LastIndexed string `json:"last_indexed"`
+}
+
+type IndexJobStats struct {
+	ProjectName string `json:"project_name"`
+	Kind        string `json:"kind"`
+	State       string `json:"state"`
+	Attempts    int    `json:"attempts"`
+	CreatedAt   string `json:"created_at"`
+	FinishedAt  string `json:"finished_at"`
 }
 
 // GetMetrics returns usage analytics for a tenant.
@@ -160,6 +206,149 @@ func (s *Store) GetMetrics(ctx context.Context, tenantID uuid.UUID, from, to tim
 			return MetricsSummary{}, fmt.Errorf("scan project bucket: %w", err)
 		}
 		m.QueriesByProject = append(m.QueriesByProject, b)
+	}
+
+	// ── Extended metrics ─────────────────────────────────────────────────────
+
+	// Queries by actor (who uses brain the most)
+	actorRows, err := s.pool.Query(ctx, `
+		SELECT
+			COALESCE(NULLIF(actor_prefix, ''), '(unknown)') as actor,
+			COUNT(*)                     as queries,
+			COALESCE(AVG(avg_score), 0)  as avg_score
+		FROM query_logs
+		WHERE tenant_id = $1
+		  AND created_at BETWEEN $2 AND $3
+		GROUP BY actor
+		ORDER BY queries DESC
+		LIMIT 20
+	`, tenantID, from, to)
+	if err != nil {
+		return MetricsSummary{}, fmt.Errorf("get actor metrics: %w", err)
+	}
+	defer actorRows.Close()
+	for actorRows.Next() {
+		var b ActorBucket
+		if err := actorRows.Scan(&b.ActorPrefix, &b.Queries, &b.AvgScore); err != nil {
+			return MetricsSummary{}, fmt.Errorf("scan actor bucket: %w", err)
+		}
+		m.QueriesByActor = append(m.QueriesByActor, b)
+	}
+
+	// Peak usage hours
+	hourRows, err := s.pool.Query(ctx, `
+		SELECT
+			EXTRACT(HOUR FROM created_at AT TIME ZONE 'UTC')::int as hour,
+			COUNT(*) as queries
+		FROM query_logs
+		WHERE tenant_id = $1
+		  AND created_at BETWEEN $2 AND $3
+		GROUP BY hour
+		ORDER BY hour
+	`, tenantID, from, to)
+	if err != nil {
+		return MetricsSummary{}, fmt.Errorf("get hourly metrics: %w", err)
+	}
+	defer hourRows.Close()
+	for hourRows.Next() {
+		var b HourBucket
+		if err := hourRows.Scan(&b.Hour, &b.Queries); err != nil {
+			return MetricsSummary{}, fmt.Errorf("scan hour bucket: %w", err)
+		}
+		m.QueriesByHour = append(m.QueriesByHour, b)
+	}
+
+	// Score distribution: excellent (>=0.7), good (0.4-0.7), poor (<0.4)
+	err = s.pool.QueryRow(ctx, `
+		SELECT
+			COUNT(*) FILTER (WHERE top_score >= 0.7)                   as excellent,
+			COUNT(*) FILTER (WHERE top_score >= 0.4 AND top_score < 0.7) as good,
+			COUNT(*) FILTER (WHERE top_score < 0.4)                    as poor
+		FROM query_logs
+		WHERE tenant_id = $1
+		  AND created_at BETWEEN $2 AND $3
+	`, tenantID, from, to).Scan(&m.ScoreDistribution.Excellent, &m.ScoreDistribution.Good, &m.ScoreDistribution.Poor)
+	if err != nil {
+		return MetricsSummary{}, fmt.Errorf("get score distribution: %w", err)
+	}
+
+	// Hit ratio: avg(chunks_returned / total_candidates)
+	// Tokens per query: avg(tokens_returned)
+	err = s.pool.QueryRow(ctx, `
+		SELECT
+			COALESCE(AVG(CASE WHEN total_candidates > 0
+				THEN chunks_returned::float / total_candidates ELSE 0 END), 0),
+			COALESCE(AVG(tokens_returned), 0)
+		FROM query_logs
+		WHERE tenant_id = $1
+		  AND created_at BETWEEN $2 AND $3
+	`, tenantID, from, to).Scan(&m.HitRatio, &m.TokensPerQuery)
+	if err != nil {
+		return MetricsSummary{}, fmt.Errorf("get hit ratio: %w", err)
+	}
+
+	// Codebase stats per project (uses RLS-free direct query since we filter by tenant_id)
+	codebaseRows, err := s.pool.Query(ctx, `
+		SELECT
+			p.id::text,
+			p.name,
+			COUNT(DISTINCT f.id)             as total_files,
+			COUNT(DISTINCT c.id)             as total_chunks,
+			COALESCE(SUM(f.size_bytes) / 1024, 0) as total_size_kb,
+			COUNT(DISTINCT f.language)       as languages,
+			(SELECT ff.language FROM project_files ff
+			 WHERE ff.project_id = p.id
+			 GROUP BY ff.language ORDER BY COUNT(*) DESC LIMIT 1) as top_language,
+			COALESCE(TO_CHAR(MAX(f.indexed_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI'), 'never') as last_indexed
+		FROM projects p
+		LEFT JOIN project_files f ON f.project_id = p.id
+		LEFT JOIN chunks c ON c.project_id = p.id
+		WHERE p.tenant_id = $1 AND p.status = 'active'
+		GROUP BY p.id, p.name
+		ORDER BY total_chunks DESC
+	`, tenantID)
+	if err != nil {
+		return MetricsSummary{}, fmt.Errorf("get codebase stats: %w", err)
+	}
+	defer codebaseRows.Close()
+	for codebaseRows.Next() {
+		var ps ProjectStats
+		var topLang *string
+		if err := codebaseRows.Scan(&ps.ProjectID, &ps.ProjectName, &ps.TotalFiles,
+			&ps.TotalChunks, &ps.TotalSizeKB, &ps.Languages, &topLang, &ps.LastIndexed); err != nil {
+			return MetricsSummary{}, fmt.Errorf("scan codebase stats: %w", err)
+		}
+		if topLang != nil {
+			ps.TopLanguage = *topLang
+		}
+		m.CodebaseStats = append(m.CodebaseStats, ps)
+	}
+
+	// Recent index jobs (last 10)
+	jobRows, err := s.pool.Query(ctx, `
+		SELECT
+			p.name,
+			j.kind,
+			j.state,
+			j.attempt,
+			TO_CHAR(j.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI') as created,
+			COALESCE(TO_CHAR(j.finished_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI'), 'running') as finished
+		FROM index_jobs j
+		JOIN projects p ON p.id = j.project_id
+		WHERE j.tenant_id = $1
+		ORDER BY j.created_at DESC
+		LIMIT 10
+	`, tenantID)
+	if err != nil {
+		return MetricsSummary{}, fmt.Errorf("get index jobs: %w", err)
+	}
+	defer jobRows.Close()
+	for jobRows.Next() {
+		var j IndexJobStats
+		if err := jobRows.Scan(&j.ProjectName, &j.Kind, &j.State, &j.Attempts, &j.CreatedAt, &j.FinishedAt); err != nil {
+			return MetricsSummary{}, fmt.Errorf("scan index job: %w", err)
+		}
+		m.IndexJobs = append(m.IndexJobs, j)
 	}
 
 	return m, nil

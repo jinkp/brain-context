@@ -49,13 +49,27 @@ func (h *Handler) GetMetrics(c echo.Context) error {
 			"estimated_tokens_served": metrics.EstimatedTokensServed,
 			"estimated_tokens_saved":  metrics.EstimatedTokensSaved,
 			"savings_percent":         round2(metrics.SavingsPercent),
+			"hit_ratio":              round2(metrics.HitRatio),
+			"tokens_per_query":       round2(metrics.TokensPerQuery),
+		},
+		"score_distribution": map[string]int64{
+			"excellent": metrics.ScoreDistribution.Excellent,
+			"good":      metrics.ScoreDistribution.Good,
+			"poor":      metrics.ScoreDistribution.Poor,
 		},
 		"queries_by_day":     metrics.QueriesByDay,
 		"queries_by_project": metrics.QueriesByProject,
+		"queries_by_actor":   metrics.QueriesByActor,
+		"queries_by_hour":    metrics.QueriesByHour,
+		"codebase_stats":     metrics.CodebaseStats,
+		"index_jobs":         metrics.IndexJobs,
 		"interpretation": map[string]string{
 			"avg_relevance_score": "0.0-1.0. Above 0.6 = good relevance. Below 0.4 = consider re-indexing.",
 			"savings_percent":     "Estimated % of LLM context tokens saved vs sending the full repository.",
 			"tokens_saved":        "Tokens your LLM did NOT receive because brain-context filtered them out.",
+			"hit_ratio":          "chunks_returned / total_candidates. Lower = more selective filtering.",
+			"score_distribution": "excellent (>=0.7), good (0.4-0.7), poor (<0.4) based on top_score.",
+			"tokens_per_query":   "Avg tokens returned per query. Track over time to spot bloat.",
 		},
 	})
 }

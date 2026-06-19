@@ -30,7 +30,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-var version = "v0.6.1" // overridden by -ldflags at build time
+var version = "v0.7.0" // overridden by -ldflags at build time
 
 var httpClient = &http.Client{Timeout: 30 * time.Second}
 
@@ -566,7 +566,14 @@ type metricsResponse struct {
 		EstimatedTokensServed int64   `json:"estimated_tokens_served"`
 		EstimatedTokensSaved  int64   `json:"estimated_tokens_saved"`
 		SavingsPercent        float64 `json:"savings_percent"`
+		HitRatio              float64 `json:"hit_ratio"`
+		TokensPerQuery        float64 `json:"tokens_per_query"`
 	} `json:"summary"`
+	ScoreDistribution struct {
+		Excellent int64 `json:"excellent"`
+		Good      int64 `json:"good"`
+		Poor      int64 `json:"poor"`
+	} `json:"score_distribution"`
 	QueriesByDay []struct {
 		Date    string `json:"date"`
 		Queries int64  `json:"queries"`
@@ -577,6 +584,32 @@ type metricsResponse struct {
 		Queries     int64   `json:"queries"`
 		AvgScore    float64 `json:"avg_score"`
 	} `json:"queries_by_project"`
+	QueriesByActor []struct {
+		ActorPrefix string  `json:"actor_prefix"`
+		Queries     int64   `json:"queries"`
+		AvgScore    float64 `json:"avg_score"`
+	} `json:"queries_by_actor"`
+	QueriesByHour []struct {
+		Hour    int   `json:"hour"`
+		Queries int64 `json:"queries"`
+	} `json:"queries_by_hour"`
+	CodebaseStats []struct {
+		ProjectName string `json:"project_name"`
+		TotalFiles  int64  `json:"total_files"`
+		TotalChunks int64  `json:"total_chunks"`
+		TotalSizeKB int64  `json:"total_size_kb"`
+		Languages   int64  `json:"languages"`
+		TopLanguage string `json:"top_language"`
+		LastIndexed string `json:"last_indexed"`
+	} `json:"codebase_stats"`
+	IndexJobs []struct {
+		ProjectName string `json:"project_name"`
+		Kind        string `json:"kind"`
+		State       string `json:"state"`
+		Attempts    int    `json:"attempts"`
+		CreatedAt   string `json:"created_at"`
+		FinishedAt  string `json:"finished_at"`
+	} `json:"index_jobs"`
 }
 
 func runMetrics(args []string) error {
@@ -641,6 +674,7 @@ func runMetrics(args []string) error {
 func printMetrics(m metricsResponse) {
 	s := m.Summary
 
+	// ── Summary ──────────────────────────────────────────────────────────────
 	fmt.Println()
 	fmt.Printf("  Brain Context Metrics  (%s to %s)\n", m.Period.From, m.Period.To)
 	fmt.Println("  " + strings.Repeat("─", 50))
@@ -654,8 +688,22 @@ func printMetrics(m metricsResponse) {
 	fmt.Printf("  %-28s %s\n", "Tokens served to LLM:", formatTokens(s.EstimatedTokensServed))
 	fmt.Printf("  %-28s %s\n", "Tokens saved (filtered):", formatTokens(s.EstimatedTokensSaved))
 	fmt.Printf("  %-28s %.1f%%\n", "Savings:", s.SavingsPercent)
+	fmt.Printf("  %-28s %.1f%%\n", "Hit ratio:", s.HitRatio*100)
+	fmt.Printf("  %-28s %s\n", "Avg tokens/query:", formatTokens(int64(s.TokensPerQuery)))
 	fmt.Println()
 
+	// ── Score distribution ───────────────────────────────────────────────────
+	sd := m.ScoreDistribution
+	sdTotal := sd.Excellent + sd.Good + sd.Poor
+	if sdTotal > 0 {
+		fmt.Println("  Score distribution:")
+		fmt.Printf("    Excellent (>=0.7):  %4d  (%4.1f%%)\n", sd.Excellent, pct(sd.Excellent, sdTotal))
+		fmt.Printf("    Good (0.4-0.7):     %4d  (%4.1f%%)\n", sd.Good, pct(sd.Good, sdTotal))
+		fmt.Printf("    Poor (<0.4):        %4d  (%4.1f%%)\n", sd.Poor, pct(sd.Poor, sdTotal))
+		fmt.Println()
+	}
+
+	// ── Queries by project ───────────────────────────────────────────────────
 	if len(m.QueriesByProject) > 0 {
 		fmt.Println("  Queries by project:")
 		fmt.Printf("    %-24s %8s %10s\n", "PROJECT", "QUERIES", "AVG SCORE")
@@ -666,9 +714,39 @@ func printMetrics(m metricsResponse) {
 		fmt.Println()
 	}
 
+	// ── Queries by actor ─────────────────────────────────────────────────────
+	if len(m.QueriesByActor) > 0 {
+		fmt.Println("  Queries by actor:")
+		fmt.Printf("    %-20s %8s %10s\n", "ACTOR", "QUERIES", "AVG SCORE")
+		fmt.Printf("    %-20s %8s %10s\n", "────────────────────", "────────", "──────────")
+		for _, a := range m.QueriesByActor {
+			fmt.Printf("    %-20s %8d %10.2f\n", truncate(a.ActorPrefix, 20), a.Queries, a.AvgScore)
+		}
+		fmt.Println()
+	}
+
+	// ── Peak hours ───────────────────────────────────────────────────────────
+	if len(m.QueriesByHour) > 0 {
+		fmt.Println("  Peak usage hours (UTC):")
+		var maxQ int64
+		for _, h := range m.QueriesByHour {
+			if h.Queries > maxQ {
+				maxQ = h.Queries
+			}
+		}
+		for _, h := range m.QueriesByHour {
+			barLen := 0
+			if maxQ > 0 {
+				barLen = int(h.Queries * 30 / maxQ)
+			}
+			fmt.Printf("    %02d:00  %3d  %s\n", h.Hour, h.Queries, strings.Repeat("▓", barLen))
+		}
+		fmt.Println()
+	}
+
+	// ── Queries by day ───────────────────────────────────────────────────────
 	if len(m.QueriesByDay) > 0 {
 		fmt.Println("  Queries by day (recent):")
-		// Show at most the last 14 days
 		start := 0
 		if len(m.QueriesByDay) > 14 {
 			start = len(m.QueriesByDay) - 14
@@ -679,6 +757,36 @@ func printMetrics(m metricsResponse) {
 				bar = strings.Repeat("█", 40) + "…"
 			}
 			fmt.Printf("    %s  %3d  %s\n", d.Date, d.Queries, bar)
+		}
+		fmt.Println()
+	}
+
+	// ── Codebase stats ───────────────────────────────────────────────────────
+	if len(m.CodebaseStats) > 0 {
+		fmt.Println("  Codebase stats:")
+		fmt.Printf("    %-20s %6s %7s %8s %5s %-10s %s\n",
+			"PROJECT", "FILES", "CHUNKS", "SIZE", "LANG", "TOP LANG", "LAST INDEXED")
+		fmt.Printf("    %-20s %6s %7s %8s %5s %-10s %s\n",
+			"────────────────────", "──────", "───────", "────────", "─────", "──────────", "────────────────")
+		for _, cs := range m.CodebaseStats {
+			size := formatSize(cs.TotalSizeKB)
+			fmt.Printf("    %-20s %6d %7d %8s %5d %-10s %s\n",
+				truncate(cs.ProjectName, 20), cs.TotalFiles, cs.TotalChunks,
+				size, cs.Languages, truncate(cs.TopLanguage, 10), cs.LastIndexed)
+		}
+		fmt.Println()
+	}
+
+	// ── Index jobs ───────────────────────────────────────────────────────────
+	if len(m.IndexJobs) > 0 {
+		fmt.Println("  Recent index jobs:")
+		fmt.Printf("    %-20s %-12s %-10s %4s  %-16s  %s\n",
+			"PROJECT", "KIND", "STATE", "TRY", "STARTED", "FINISHED")
+		fmt.Printf("    %-20s %-12s %-10s %4s  %-16s  %s\n",
+			"────────────────────", "────────────", "──────────", "────", "────────────────", "────────────────")
+		for _, j := range m.IndexJobs {
+			fmt.Printf("    %-20s %-12s %-10s %4d  %-16s  %s\n",
+				truncate(j.ProjectName, 20), j.Kind, j.State, j.Attempts, j.CreatedAt, j.FinishedAt)
 		}
 		fmt.Println()
 	}
@@ -693,6 +801,24 @@ func formatTokens(n int64) string {
 	default:
 		return fmt.Sprintf("%d", n)
 	}
+}
+
+func formatSize(kb int64) string {
+	switch {
+	case kb >= 1_048_576:
+		return fmt.Sprintf("%.1f GB", float64(kb)/1_048_576)
+	case kb >= 1024:
+		return fmt.Sprintf("%.1f MB", float64(kb)/1024)
+	default:
+		return fmt.Sprintf("%d KB", kb)
+	}
+}
+
+func pct(n, total int64) float64 {
+	if total == 0 {
+		return 0
+	}
+	return float64(n) / float64(total) * 100
 }
 
 func truncate(s string, maxLen int) string {
