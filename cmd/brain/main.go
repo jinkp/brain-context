@@ -30,7 +30,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-var version = "v0.1.1" // overridden by -ldflags at build time
+var version = "v0.6.0" // overridden by -ldflags at build time
 
 var httpClient = &http.Client{Timeout: 30 * time.Second}
 
@@ -97,6 +97,8 @@ func main() {
 		err = runInvite(os.Args[2:])
 	case "join":
 		err = runJoin(os.Args[2:])
+	case "metrics":
+		err = runMetrics(os.Args[2:])
 	case "solution":
 		err = runSolution(os.Args[2:])
 	case "version":
@@ -393,6 +395,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  brain projects delete --project <name>  remove a project")
 	fmt.Fprintln(os.Stderr, "  brain projects rename --project <old> --name <new>  rename a project")
 	fmt.Fprintln(os.Stderr, "  brain scan           --project <name> [--stack <stack>]  preview which files would be indexed")
+	fmt.Fprintln(os.Stderr, "  brain metrics        [--from YYYY-MM-DD] [--to YYYY-MM-DD]  usage analytics")
 	fmt.Fprintln(os.Stderr, "  brain mcp            [--project <name>]")
 	fmt.Fprintln(os.Stderr, "  brain solution create --name <n> --projects proj1,proj2,proj3")
 	fmt.Fprintln(os.Stderr, "  brain solution list")
@@ -545,6 +548,154 @@ func runJoin(args []string) error {
 	fmt.Println()
 	fmt.Println("  ⚠️  Store your mcp_read_key — it is shown once.")
 	return nil
+}
+
+// ── metrics ──────────────────────────────────────────────────────────────────
+
+type metricsResponse struct {
+	Period struct {
+		From string `json:"from"`
+		To   string `json:"to"`
+	} `json:"period"`
+	Summary struct {
+		TotalQueries          int64   `json:"total_queries"`
+		QueriesLast7Days      int64   `json:"queries_last_7_days"`
+		QueriesLast30Days     int64   `json:"queries_last_30_days"`
+		AvgRelevanceScore     float64 `json:"avg_relevance_score"`
+		AvgChunksReturned     float64 `json:"avg_chunks_returned"`
+		EstimatedTokensServed int64   `json:"estimated_tokens_served"`
+		EstimatedTokensSaved  int64   `json:"estimated_tokens_saved"`
+		SavingsPercent        float64 `json:"savings_percent"`
+	} `json:"summary"`
+	QueriesByDay []struct {
+		Date    string `json:"date"`
+		Queries int64  `json:"queries"`
+	} `json:"queries_by_day"`
+	QueriesByProject []struct {
+		ProjectID   string  `json:"project_id"`
+		ProjectName string  `json:"project_name"`
+		Queries     int64   `json:"queries"`
+		AvgScore    float64 `json:"avg_score"`
+	} `json:"queries_by_project"`
+}
+
+func runMetrics(args []string) error {
+	fs := flag.NewFlagSet("metrics", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fromStr := fs.String("from", "", "start date (YYYY-MM-DD, default: Jan 1 of current year)")
+	toStr := fs.String("to", "", "end date (YYYY-MM-DD, default: today)")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("parse flags: %w", err)
+	}
+
+	now := time.Now().UTC()
+	from := time.Date(now.Year(), 1, 1, 0, 0, 0, 0, time.UTC).Format("2006-01-02")
+	to := now.Format("2006-01-02")
+	if *fromStr != "" {
+		if _, err := time.Parse("2006-01-02", *fromStr); err != nil {
+			return fmt.Errorf("invalid --from date %q (expected YYYY-MM-DD)", *fromStr)
+		}
+		from = *fromStr
+	}
+	if *toStr != "" {
+		if _, err := time.Parse("2006-01-02", *toStr); err != nil {
+			return fmt.Errorf("invalid --to date %q (expected YYYY-MM-DD)", *toStr)
+		}
+		to = *toStr
+	}
+
+	cfg, err := brainconfig.Load()
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(cfg.TenantToken) == "" {
+		return fmt.Errorf("not logged in — run `brain login` first")
+	}
+	if strings.TrimSpace(cfg.APIEndpoint) == "" {
+		return fmt.Errorf("api endpoint not set — run `brain login` first")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	url := fmt.Sprintf("%s/api/metrics?from=%s&to=%s", cfg.APIEndpoint, from, to)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.TenantToken)
+
+	var resp metricsResponse
+	if _, err := doJSON(req, &resp); err != nil {
+		return fmt.Errorf("fetch metrics: %w", err)
+	}
+
+	printMetrics(resp)
+	return nil
+}
+
+func printMetrics(m metricsResponse) {
+	s := m.Summary
+
+	fmt.Println()
+	fmt.Printf("  Brain Context Metrics  (%s to %s)\n", m.Period.From, m.Period.To)
+	fmt.Println("  " + strings.Repeat("─", 50))
+	fmt.Println()
+
+	fmt.Printf("  %-28s %d\n", "Total queries:", s.TotalQueries)
+	fmt.Printf("  %-28s %d\n", "Queries (last 7 days):", s.QueriesLast7Days)
+	fmt.Printf("  %-28s %d\n", "Queries (last 30 days):", s.QueriesLast30Days)
+	fmt.Printf("  %-28s %.2f\n", "Avg relevance score:", s.AvgRelevanceScore)
+	fmt.Printf("  %-28s %.1f\n", "Avg chunks returned:", s.AvgChunksReturned)
+	fmt.Printf("  %-28s %s\n", "Tokens served to LLM:", formatTokens(s.EstimatedTokensServed))
+	fmt.Printf("  %-28s %s\n", "Tokens saved (filtered):", formatTokens(s.EstimatedTokensSaved))
+	fmt.Printf("  %-28s %.1f%%\n", "Savings:", s.SavingsPercent)
+	fmt.Println()
+
+	if len(m.QueriesByProject) > 0 {
+		fmt.Println("  Queries by project:")
+		fmt.Printf("    %-24s %8s %10s\n", "PROJECT", "QUERIES", "AVG SCORE")
+		fmt.Printf("    %-24s %8s %10s\n", "────────────────────────", "────────", "──────────")
+		for _, p := range m.QueriesByProject {
+			fmt.Printf("    %-24s %8d %10.2f\n", truncate(p.ProjectName, 24), p.Queries, p.AvgScore)
+		}
+		fmt.Println()
+	}
+
+	if len(m.QueriesByDay) > 0 {
+		fmt.Println("  Queries by day (recent):")
+		// Show at most the last 14 days
+		start := 0
+		if len(m.QueriesByDay) > 14 {
+			start = len(m.QueriesByDay) - 14
+		}
+		for _, d := range m.QueriesByDay[start:] {
+			bar := strings.Repeat("█", int(d.Queries))
+			if d.Queries > 40 {
+				bar = strings.Repeat("█", 40) + "…"
+			}
+			fmt.Printf("    %s  %3d  %s\n", d.Date, d.Queries, bar)
+		}
+		fmt.Println()
+	}
+}
+
+func formatTokens(n int64) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fK", float64(n)/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
+}
+
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-1] + "…"
 }
 
 // ── tokens ───────────────────────────────────────────────────────────────────
