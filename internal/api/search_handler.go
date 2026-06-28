@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -10,6 +11,8 @@ import (
 	"time"
 
 	"github.com/Gentleman-Programming/brain-context/internal/auth"
+	"github.com/Gentleman-Programming/brain-context/internal/crypto"
+	"github.com/Gentleman-Programming/brain-context/internal/embedder"
 	"github.com/Gentleman-Programming/brain-context/internal/retriever"
 	"github.com/Gentleman-Programming/brain-context/internal/store"
 	"github.com/google/uuid"
@@ -18,11 +21,24 @@ import (
 )
 
 type searchRequest struct {
+	Query                string    `json:"query,omitempty"`
 	QueryEmbedding       []float32 `json:"query_embedding"`
 	QueryTSV             string    `json:"query_tsv,omitempty"`
 	MaxChunks            int       `json:"max_chunks"`
 	IncludeRelationships bool      `json:"include_relationships"`
 }
+
+var (
+	newEmbedderFn     = embedder.New
+	decryptEmbedKeyFn = crypto.Decrypt
+	loadEmbedKeyFn    = func(ctx context.Context, st *store.Store, tenantID, projectID uuid.UUID) (string, error) {
+		return st.GetEmbedAPIKey(ctx, tenantID, projectID)
+	}
+
+	errSearchQueryRequired   = errors.New("query or query_embedding is required")
+	errSearchEmbeddingLength = errors.New("query_embedding has invalid dimensions")
+	errSearchEmbedKeyMissing = errors.New("project embedder api key is not configured on the server")
+)
 
 type searchResponse struct {
 	ProjectID       uuid.UUID             `json:"project_id"`
@@ -84,6 +100,8 @@ type impactSymbolResult struct {
 }
 
 func (h *Handler) SearchContext(c echo.Context) error {
+	tStart := time.Now()
+
 	projectID, tenantID, err := h.authorizeProjectRead(c)
 	if err != nil {
 		return err
@@ -93,24 +111,32 @@ func (h *Handler) SearchContext(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return writeError(c, http.StatusBadRequest, "VALIDATION_ERROR", "invalid request body")
 	}
-	if len(req.QueryEmbedding) == 0 {
-		return writeError(c, http.StatusBadRequest, "VALIDATION_ERROR", "query_embedding is required")
-	}
 
+	tProject := time.Now()
 	project, err := h.store.GetProject(c.Request().Context(), tenantID, projectID)
 	if err != nil {
 		return handleStoreError(c, err)
 	}
-	if len(req.QueryEmbedding) != project.EmbedDimensions {
-		return writeError(c, http.StatusBadRequest, "VALIDATION_ERROR", fmt.Sprintf("query_embedding must contain %d dimensions", project.EmbedDimensions))
-	}
+	_ = int(time.Since(tProject).Milliseconds()) // project_load_ms (not stored)
 
-	candidates, err := retriever.Search(c.Request().Context(), h.store.Executor(c.Request().Context()), projectID, tenantID, req.QueryEmbedding, project.EmbedDimensions, req.MaxChunks)
+	tEmbed := time.Now()
+	queryEmbedding, rerankText, err := h.resolveSearchQuery(c.Request().Context(), tenantID, project, req)
+	if err != nil {
+		return h.handleSearchQueryError(c, err, project.EmbedDimensions)
+	}
+	embedMs := int(time.Since(tEmbed).Milliseconds())
+
+	tVector := time.Now()
+	candidates, err := retriever.Search(c.Request().Context(), h.store.Executor(c.Request().Context()), projectID, tenantID, queryEmbedding, project.EmbedDimensions, req.MaxChunks)
 	if err != nil {
 		return writeError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to search project context")
 	}
+	vectorMs := int(time.Since(tVector).Milliseconds())
 
-	ranked := retriever.Rerank(candidates, req.QueryTSV, req.MaxChunks)
+	tRerank := time.Now()
+	ranked := retriever.Rerank(candidates, rerankText, req.MaxChunks)
+	rerankMs := int(time.Since(tRerank).Milliseconds())
+
 	chunks := make([]searchChunkResponse, 0, len(ranked))
 	for _, candidate := range ranked {
 		relationships := candidate.Relationships
@@ -148,7 +174,9 @@ func (h *Handler) SearchContext(c echo.Context) error {
 	if len(ranked) > 0 {
 		avgScore = scoreSum / float64(len(ranked))
 	}
+	tMetrics := time.Now()
 	totalChunks, avgTokens, _ := h.store.GetProjectChunkCount(c.Request().Context(), tenantID, projectID)
+	totalMs := int(time.Since(tStart).Milliseconds())
 	h.store.InsertQueryLog(c.Request().Context(), store.QueryLog{
 		TenantID:        tenantID,
 		ProjectID:       projectID,
@@ -159,9 +187,69 @@ func (h *Handler) SearchContext(c echo.Context) error {
 		TotalCandidates: len(candidates),
 		TokensReturned:  tokensReturned,
 		TokensInRepo:    totalChunks * avgTokens,
+		TotalMs:         totalMs,
+		EmbedMs:         embedMs,
+		VectorMs:        vectorMs,
+		RelationsMs:     0,
+		RerankMs:        rerankMs,
+		MetricsMs:       int(time.Since(tMetrics).Milliseconds()),
 	})
 
 	return c.JSON(http.StatusOK, searchResponse{ProjectID: projectID, Chunks: chunks, TotalCandidates: len(candidates)})
+}
+
+func (h *Handler) resolveSearchQuery(ctx context.Context, tenantID uuid.UUID, project store.Project, req searchRequest) ([]float32, string, error) {
+	query := strings.TrimSpace(req.Query)
+	if query != "" {
+		apiKey := ""
+		if !strings.HasPrefix(project.EmbedModel, embedder.ProviderOllama+"/") {
+			encryptedKey, err := loadEmbedKeyFn(ctx, h.store, tenantID, project.ID)
+			if err != nil {
+				return nil, "", errSearchEmbedKeyMissing
+			}
+			decryptedKey, err := decryptEmbedKeyFn(encryptedKey)
+			if err != nil {
+				return nil, "", fmt.Errorf("decrypt embed api key: %w", err)
+			}
+			apiKey = decryptedKey
+		}
+		emb, err := newEmbedderFn(project.EmbedModel, apiKey)
+		if err != nil {
+			return nil, "", fmt.Errorf("create embedder: %w", err)
+		}
+		vectors, err := emb.Embed(ctx, []string{query})
+		if err != nil {
+			return nil, "", fmt.Errorf("embed query: %w", err)
+		}
+		if len(vectors) == 0 {
+			return nil, "", fmt.Errorf("embed query: no vector returned")
+		}
+		if len(vectors[0]) != project.EmbedDimensions {
+			return nil, "", fmt.Errorf("embed query: expected %d dimensions, got %d", project.EmbedDimensions, len(vectors[0]))
+		}
+		return vectors[0], query, nil
+	}
+
+	if len(req.QueryEmbedding) == 0 {
+		return nil, "", errSearchQueryRequired
+	}
+	if len(req.QueryEmbedding) != project.EmbedDimensions {
+		return nil, "", fmt.Errorf("%w: expected %d, got %d", errSearchEmbeddingLength, project.EmbedDimensions, len(req.QueryEmbedding))
+	}
+	return req.QueryEmbedding, req.QueryTSV, nil
+}
+
+func (h *Handler) handleSearchQueryError(c echo.Context, err error, expectedDimensions int) error {
+	switch {
+	case errors.Is(err, errSearchQueryRequired):
+		return writeError(c, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
+	case errors.Is(err, errSearchEmbeddingLength):
+		return writeError(c, http.StatusBadRequest, "VALIDATION_ERROR", fmt.Sprintf("query_embedding must contain %d dimensions", expectedDimensions))
+	case errors.Is(err, errSearchEmbedKeyMissing):
+		return writeError(c, http.StatusServiceUnavailable, "EMBED_KEY_MISSING", err.Error())
+	default:
+		return writeError(c, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+	}
 }
 
 func (h *Handler) GetFileSummary(c echo.Context) error {

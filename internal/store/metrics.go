@@ -20,6 +20,12 @@ type QueryLog struct {
 	TotalCandidates int
 	TokensReturned  int
 	TokensInRepo    int
+	TotalMs         int
+	EmbedMs         int
+	VectorMs        int
+	RelationsMs     int
+	RerankMs        int
+	MetricsMs       int
 }
 
 // InsertQueryLog persists a search event using a fresh background context
@@ -37,12 +43,14 @@ func (s *Store) InsertQueryLog(_ context.Context, log QueryLog) {
 		INSERT INTO query_logs (
 			tenant_id, project_id, actor_prefix,
 			chunks_returned, top_score, avg_score,
-			total_candidates, tokens_returned, tokens_in_repo
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+			total_candidates, tokens_returned, tokens_in_repo,
+			total_ms, embed_ms, vector_ms, relations_ms, rerank_ms, metrics_ms
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
 	`,
 		log.TenantID, log.ProjectID, log.ActorPrefix,
 		log.ChunksReturned, log.TopScore, log.AvgScore,
 		log.TotalCandidates, log.TokensReturned, log.TokensInRepo,
+		log.TotalMs, log.EmbedMs, log.VectorMs, log.RelationsMs, log.RerankMs, log.MetricsMs,
 	)
 	if err != nil {
 		fmt.Printf("[metrics] insert query_log failed: %v\n", err)
@@ -71,6 +79,14 @@ type MetricsSummary struct {
 	TokensPerQuery    float64          `json:"tokens_per_query"`
 	CodebaseStats     []ProjectStats   `json:"codebase_stats"`
 	IndexJobs         []IndexJobStats  `json:"index_jobs"`
+
+	// Latency metrics (averages in milliseconds)
+	AvgTotalMs     float64 `json:"avg_total_ms"`
+	AvgEmbedMs     float64 `json:"avg_embed_ms"`
+	AvgVectorMs    float64 `json:"avg_vector_ms"`
+	AvgRelationsMs float64 `json:"avg_relations_ms"`
+	AvgRerankMs    float64 `json:"avg_rerank_ms"`
+	AvgMetricsMs   float64 `json:"avg_metrics_ms"`
 }
 
 type DayBucket struct {
@@ -135,7 +151,13 @@ func (s *Store) GetMetrics(ctx context.Context, tenantID uuid.UUID, from, to tim
 			COALESCE(AVG(avg_score), 0)                as avg_score,
 			COALESCE(AVG(chunks_returned), 0)          as avg_chunks,
 			COALESCE(SUM(tokens_returned), 0)          as tokens_served,
-			COALESCE(SUM(tokens_in_repo - tokens_returned), 0) as tokens_saved
+			COALESCE(SUM(tokens_in_repo - tokens_returned), 0) as tokens_saved,
+			COALESCE(AVG(total_ms), 0)                 as avg_total_ms,
+			COALESCE(AVG(embed_ms), 0)                 as avg_embed_ms,
+			COALESCE(AVG(vector_ms), 0)                as avg_vector_ms,
+			COALESCE(AVG(relations_ms), 0)             as avg_relations_ms,
+			COALESCE(AVG(rerank_ms), 0)                as avg_rerank_ms,
+			COALESCE(AVG(metrics_ms), 0)               as avg_metrics_ms
 		FROM query_logs
 		WHERE tenant_id = $1
 		  AND created_at BETWEEN $2 AND $3
@@ -147,6 +169,12 @@ func (s *Store) GetMetrics(ctx context.Context, tenantID uuid.UUID, from, to tim
 		&m.AvgChunksReturned,
 		&m.EstimatedTokensServed,
 		&m.EstimatedTokensSaved,
+		&m.AvgTotalMs,
+		&m.AvgEmbedMs,
+		&m.AvgVectorMs,
+		&m.AvgRelationsMs,
+		&m.AvgRerankMs,
+		&m.AvgMetricsMs,
 	)
 	if err != nil {
 		return MetricsSummary{}, fmt.Errorf("get metrics summary: %w", err)

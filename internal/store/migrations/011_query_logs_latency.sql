@@ -1,0 +1,7 @@
+ALTER TABLE query_logs
+    ADD COLUMN IF NOT EXISTS total_ms       int NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS embed_ms       int NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS vector_ms      int NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS relations_ms   int NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS rerank_ms      int NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS metrics_ms     int NOT NULL DEFAULT 0;

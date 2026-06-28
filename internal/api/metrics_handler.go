@@ -52,6 +52,14 @@ func (h *Handler) GetMetrics(c echo.Context) error {
 			"hit_ratio":              round2(metrics.HitRatio),
 			"tokens_per_query":       round2(metrics.TokensPerQuery),
 		},
+		"latency_ms": map[string]any{
+			"avg_total":     round2(metrics.AvgTotalMs),
+			"avg_embed":     round2(metrics.AvgEmbedMs),
+			"avg_vector":    round2(metrics.AvgVectorMs),
+			"avg_relations": round2(metrics.AvgRelationsMs),
+			"avg_rerank":    round2(metrics.AvgRerankMs),
+			"avg_metrics":   round2(metrics.AvgMetricsMs),
+		},
 		"score_distribution": map[string]int64{
 			"excellent": metrics.ScoreDistribution.Excellent,
 			"good":      metrics.ScoreDistribution.Good,
