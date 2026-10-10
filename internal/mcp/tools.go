@@ -16,7 +16,6 @@ import (
 	"time"
 
 	brainconfig "github.com/Gentleman-Programming/brain-context/internal/config"
-	"github.com/Gentleman-Programming/brain-context/internal/embedder"
 	"github.com/Gentleman-Programming/brain-context/internal/retriever"
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 )
@@ -60,7 +59,8 @@ func (e projectNotRegisteredError) Error() string {
 }
 
 type searchRequest struct {
-	QueryEmbedding       []float32 `json:"query_embedding"`
+	Query                string    `json:"query,omitempty"`
+	QueryEmbedding       []float32 `json:"query_embedding,omitempty"`
 	QueryTSV             string    `json:"query_tsv,omitempty"`
 	MaxChunks            int       `json:"max_chunks"`
 	IncludeRelationships bool      `json:"include_relationships"`
@@ -195,6 +195,22 @@ func (s *Server) handleSearchProjectContext(ctx context.Context, req mcpgo.CallT
 	}
 	maxChunks := clampToolNumber(req.GetFloat("max_chunks", 8), 8, 20)
 
+	// OKF-first orchestration: query the local knowledge layer before falling back
+	// to the RAG code index. This returns curated, structured knowledge (requirements,
+	// decisions, playbooks) with lower token cost when a confident match is found.
+	// Falls back transparently when okfIndex is nil (no bundles registered) or when
+	// the best FTS5 score is below the project's configured threshold (default 0.7).
+	if s.okfIndex != nil {
+		if result, ok := s.okfIndex.Query(ctx, projectID, query, project.OKFThreshold, project.LocalOnly); ok {
+			return textResult(result), nil
+		}
+	}
+
+	// local_only projects have no RAG index (no server project) — return empty on OKF miss.
+	if project.LocalOnly {
+		return textResult("No matching context found in local knowledge bundle."), nil
+	}
+
 	result, err := s.searchContext(ctx, projectID, project, query, maxChunks, false)
 	if err != nil {
 		return toolError(err), nil
@@ -210,6 +226,22 @@ func (s *Server) handleExplainFlow(ctx context.Context, req mcpgo.CallToolReques
 	query, err := requiredTrimmedString(req, "query")
 	if err != nil {
 		return toolError(err), nil
+	}
+
+	// OKF-first orchestration: query the local knowledge layer before falling back
+	// to the RAG code index. This returns curated, structured knowledge (requirements,
+	// decisions, playbooks) with lower token cost when a confident match is found.
+	// Falls back transparently when okfIndex is nil (no bundles registered) or when
+	// the best FTS5 score is below the project's configured threshold (default 0.7).
+	if s.okfIndex != nil {
+		if result, ok := s.okfIndex.Query(ctx, projectID, query, project.OKFThreshold, project.LocalOnly); ok {
+			return textResult(result), nil
+		}
+	}
+
+	// local_only projects have no RAG index — return empty on OKF miss.
+	if project.LocalOnly {
+		return textResult("No matching context found in local knowledge bundle."), nil
 	}
 
 	result, err := s.searchContext(ctx, projectID, project, query, 20, true)
@@ -299,27 +331,6 @@ func (s *Server) handleSearchSolutionContext(ctx context.Context, req mcpgo.Call
 		return toolError(err), nil
 	}
 
-	// Use first project to embed the query (all share same model — validated at creation)
-	firstProject := projects[0]
-	if strings.TrimSpace(firstProject.EmbedModel) == "" {
-		return toolError(fmt.Errorf("project embedder is not configured")), nil
-	}
-	if strings.TrimSpace(firstProject.EmbedAPIKey) == "" && !strings.HasPrefix(firstProject.EmbedModel, embedder.ProviderOllama+"/") {
-		return toolError(fmt.Errorf("project embedder api key is not configured")), nil
-	}
-	emb, err := embedder.New(firstProject.EmbedModel, firstProject.EmbedAPIKey)
-	if err != nil {
-		return toolError(fmt.Errorf("create embedder: %w", err)), nil
-	}
-	vectors, err := emb.Embed(ctx, []string{query})
-	if err != nil {
-		return toolError(fmt.Errorf("embed query: %w", err)), nil
-	}
-	if len(vectors) == 0 {
-		return toolError(fmt.Errorf("embed query: no vector returned")), nil
-	}
-	queryEmbedding := vectors[0]
-
 	// Resolve effective threshold (for smart mode)
 	customThreshold := 0.0
 	if sol, ok := s.solutionsByName[strings.ToLower(solutionName)]; ok && sol.SmartThreshold != 0 {
@@ -329,7 +340,6 @@ func (s *Server) handleSearchSolutionContext(ctx context.Context, req mcpgo.Call
 	params := solutionSearchParams{
 		solutionName:         solutionName,
 		query:                query,
-		queryEmbedding:       queryEmbedding,
 		maxChunks:            maxChunks,
 		includeRelationships: includeRelationships,
 		mode:                 mode,
@@ -347,7 +357,7 @@ func (s *Server) handleSearchSolutionContext(ctx context.Context, req mcpgo.Call
 type solutionSearchParams struct {
 	solutionName         string
 	query                string
-	queryEmbedding       []float32
+	queryEmbedding       []float32 // legacy test field; read path now embeds server-side
 	maxChunks            int
 	includeRelationships bool
 	mode                 string
@@ -359,7 +369,6 @@ type solutionSearchParams struct {
 func (s *Server) solutionFanOut(ctx context.Context, params solutionSearchParams, projects []brainconfig.ProjectConfig) (string, error) {
 	n := len(projects)
 	solutionName := params.solutionName
-	queryEmbedding := params.queryEmbedding
 	query := params.query
 	maxChunks := params.maxChunks
 	if maxChunks <= 0 {
@@ -395,8 +404,7 @@ func (s *Server) solutionFanOut(ctx context.Context, params solutionSearchParams
 					return
 				}
 				payload := searchRequest{
-					QueryEmbedding:       queryEmbedding,
-					QueryTSV:             query,
+					Query:                query,
 					MaxChunks:            perProjectCap,
 					IncludeRelationships: includeRelationships,
 				}
@@ -467,8 +475,7 @@ func (s *Server) solutionFanOut(ctx context.Context, params solutionSearchParams
 				return
 			}
 			payload := searchRequest{
-				QueryEmbedding:       queryEmbedding,
-				QueryTSV:             query,
+				Query:                query,
 				MaxChunks:            probeCap,
 				IncludeRelationships: false,
 			}
@@ -551,8 +558,7 @@ func (s *Server) solutionFanOut(ctx context.Context, params solutionSearchParams
 		go func(idx int, project brainconfig.ProjectConfig) {
 			defer deepWg.Done()
 			payload := searchRequest{
-				QueryEmbedding:       queryEmbedding,
-				QueryTSV:             query,
+				Query:                query,
 				MaxChunks:            deepCap,
 				IncludeRelationships: includeRelationships,
 			}
@@ -698,30 +704,10 @@ func formatSmartResults(solutionName string, chunks []searchChunkResult, totalPr
 }
 
 func (s *Server) searchContext(ctx context.Context, projectID string, project brainconfig.ProjectConfig, query string, maxChunks int, includeRelationships bool) (string, error) {
-	if strings.TrimSpace(project.EmbedModel) == "" {
-		return "", fmt.Errorf("project embedder is not configured")
-	}
-	if strings.TrimSpace(project.EmbedAPIKey) == "" && !strings.HasPrefix(project.EmbedModel, embedder.ProviderOllama+"/") {
-		return "", fmt.Errorf("project embedder api key is not configured")
-	}
-
-	emb, err := embedder.New(project.EmbedModel, project.EmbedAPIKey)
-	if err != nil {
-		return "", fmt.Errorf("create embedder: %w", err)
-	}
-	vectors, err := emb.Embed(ctx, []string{query})
-	if err != nil {
-		return "", fmt.Errorf("embed query: %w", err)
-	}
-	if len(vectors) == 0 {
-		return "", fmt.Errorf("embed query: no vector returned")
-	}
-
 	var response searchResponse
 	endpoint := fmt.Sprintf("%s/api/projects/%s/context/search", s.apiEndpoint, projectID)
 	payload := searchRequest{
-		QueryEmbedding:       vectors[0],
-		QueryTSV:             query,
+		Query:                query,
 		MaxChunks:            maxChunks,
 		IncludeRelationships: includeRelationships,
 	}
@@ -755,7 +741,8 @@ func (s *Server) resolveProject(req mcpgo.CallToolRequest) (string, brainconfig.
 	if !ok {
 		return "", brainconfig.ProjectConfig{}, projectNotRegisteredError{}
 	}
-	if strings.TrimSpace(project.MCPReadKey) == "" {
+	// local_only projects have no mcp_read_key — they are OKF-only, no RAG backend.
+	if !project.LocalOnly && strings.TrimSpace(project.MCPReadKey) == "" {
 		return "", brainconfig.ProjectConfig{}, errUnauthorized
 	}
 	return projectID, project, nil

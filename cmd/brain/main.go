@@ -22,12 +22,14 @@ import (
 	"github.com/Gentleman-Programming/brain-context/internal/embedder"
 	"github.com/Gentleman-Programming/brain-context/internal/indexer"
 	brainmcp "github.com/Gentleman-Programming/brain-context/internal/mcp"
+	"github.com/Gentleman-Programming/brain-context/internal/okf"
 	"github.com/Gentleman-Programming/brain-context/internal/parser"
 	"github.com/Gentleman-Programming/brain-context/internal/scanner"
 	braintui "github.com/Gentleman-Programming/brain-context/internal/tui"
 	"github.com/Gentleman-Programming/brain-context/internal/uploader"
 	brainversion "github.com/Gentleman-Programming/brain-context/internal/version"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/google/uuid"
 )
 
 var version = "v0.7.0" // overridden by -ldflags at build time
@@ -99,6 +101,8 @@ func main() {
 		err = runJoin(os.Args[2:])
 	case "metrics":
 		err = runMetrics(os.Args[2:])
+	case "okf":
+		err = runOKF(os.Args[2:])
 	case "solution":
 		err = runSolution(os.Args[2:])
 	case "version":
@@ -401,6 +405,10 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  brain solution list")
 	fmt.Fprintln(os.Stderr, "  brain solution add   --solution <n> --project <proj>")
 	fmt.Fprintln(os.Stderr, "  brain solution remove --solution <n> --project <proj>")
+	fmt.Fprintln(os.Stderr, "  brain okf register   --project <name> --bundle <path>")
+	fmt.Fprintln(os.Stderr, "  brain okf generate   --project <name>")
+	fmt.Fprintln(os.Stderr, "  brain okf list       --project <name> [--status draft|stable|deprecated] [--stale]")
+	fmt.Fprintln(os.Stderr, "  brain okf validate   --project <name> [--refs]")
 	fmt.Fprintln(os.Stderr, "  brain tui                       interactive TUI (wizard, client setup, update)")
 	fmt.Fprintln(os.Stderr, "  brain tui clients               TUI — client selection only")
 	fmt.Fprintln(os.Stderr, "  brain tui <client>              direct: opencode, claude, cursor, gemini, windsurf, all")
@@ -479,7 +487,6 @@ type redeemInviteResponse struct {
 	ProjectName     string `json:"project_name"`
 	EmbedModel      string `json:"embed_model"`
 	EmbedDimensions int    `json:"embed_dimensions"`
-	EmbedAPIKeyEnc  string `json:"embed_api_key_enc"`
 	MCPReadKey      string `json:"mcp_read_key"`
 	Message         string `json:"message"`
 }
@@ -523,13 +530,15 @@ func runJoin(args []string) error {
 	}
 	cfg.APIEndpoint = endpoint
 
-	// Keep existing project config if present, only update tokens + embed
+	// Keep existing project config if present, only update tokens + embed.
+	// embed_api_key_enc is intentionally NOT written — since the secure-invite
+	// redesign, the server embeds queries server-side using the stored key.
+	// Invited members are read-only and never need the embed API key locally.
 	existing := cfg.Projects[resp.ProjectName]
 	existing.ProjectID = resp.ProjectID
 	existing.MCPReadKey = resp.MCPReadKey
 	existing.EmbedModel = resp.EmbedModel
 	existing.EmbedDimensions = resp.EmbedDimensions
-	existing.EmbedAPIKeyEnc = resp.EmbedAPIKeyEnc
 	cfg.Projects[resp.ProjectName] = existing
 
 	if err := brainconfig.Save(cfg); err != nil {
@@ -1804,6 +1813,14 @@ func runIndexCommand(args []string, incremental bool) error {
 		return fmt.Errorf("save snapshot: %w", err)
 	}
 
+	// OKF staleness check — runs only if an OKF bundle is registered for this project
+	if strings.TrimSpace(project.OKFBundlePath) != "" {
+		staleIDs, staleErr := okf.CheckStaleness(project.OKFBundlePath, diff)
+		if staleErr == nil && len(staleIDs) > 0 {
+			fmt.Printf("⚠️  %d OKF concept(s) may be stale — run `brain okf list --stale`\n", len(staleIDs))
+		}
+	}
+
 	localSkipped := len(allChunks) - len(chunksToEmbed)
 	if localSkipped < 0 {
 		localSkipped = 0
@@ -1878,7 +1895,10 @@ func resolveEmbedAPIKey(project brainconfig.ProjectConfig) (string, error) {
 	if strings.TrimSpace(project.EmbedAPIKey) != "" {
 		return strings.TrimSpace(project.EmbedAPIKey), nil
 	}
-	// Encrypted key (from brain join) — decrypt in memory
+	// Deprecated: encrypted key written by brain join before the secure-invite
+	// redesign. New joins no longer store embed_api_key_enc locally (the server
+	// embeds queries server-side). This path is kept for backward compat with
+	// configs created before the migration — it will be removed in a future release.
 	if strings.TrimSpace(project.EmbedAPIKeyEnc) != "" {
 		key, err := braincrypto.Decrypt(strings.TrimSpace(project.EmbedAPIKeyEnc))
 		if err != nil {
@@ -2008,4 +2028,454 @@ func mustAbsPath(path string) string {
 		return strings.TrimSpace(path)
 	}
 	return absPath
+}
+
+// ── okf ──────────────────────────────────────────────────────────────────────
+
+func runOKF(args []string) error {
+	if len(args) == 0 {
+		printOKFUsage()
+		return nil
+	}
+	switch args[0] {
+	case "local":
+		return runOKFLocal(args[1:])
+	case "register":
+		return runOKFRegister(args[1:])
+	case "generate":
+		return runOKFGenerate(args[1:])
+	case "list":
+		return runOKFList(args[1:])
+	case "validate":
+		return runOKFValidate(args[1:])
+	default:
+		printOKFUsage()
+		return nil
+	}
+}
+
+func printOKFUsage() {
+	fmt.Fprintln(os.Stderr, "usage:")
+	fmt.Fprintln(os.Stderr, "  brain okf local     --project <name> --bundle <path>   create a local-only OKF project (no server needed)")
+	fmt.Fprintln(os.Stderr, "  brain okf register  --project <name> --bundle <path>   register/re-index bundle for existing project")
+	fmt.Fprintln(os.Stderr, "  brain okf generate  --project <name>                   auto-generate drafts from code index")
+	fmt.Fprintln(os.Stderr, "  brain okf list      --project <name> [--status draft|stable|deprecated] [--stale]")
+	fmt.Fprintln(os.Stderr, "  brain okf validate  --project <name> [--refs]")
+}
+
+// runOKFLocal creates a local-only OKF project without any server interaction.
+// Use this for private knowledge bundles (org docs, personal notes, team decisions)
+// that should never be uploaded to the brain-context API.
+func runOKFLocal(args []string) error {
+	fs := flag.NewFlagSet("okf local", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	projectName := fs.String("project", "", "project name (will be created locally)")
+	bundlePath  := fs.String("bundle", "", "path to OKF bundle folder")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("parse flags: %w", err)
+	}
+	if strings.TrimSpace(*projectName) == "" {
+		return fmt.Errorf("--project is required")
+	}
+	if strings.TrimSpace(*bundlePath) == "" {
+		return fmt.Errorf("--bundle is required")
+	}
+
+	absBundlePath, err := filepath.Abs(strings.TrimSpace(*bundlePath))
+	if err != nil {
+		return fmt.Errorf("resolve bundle path: %w", err)
+	}
+	info, err := os.Stat(absBundlePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("bundle path does not exist: %s", absBundlePath)
+		}
+		return fmt.Errorf("stat bundle path: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("bundle path must be a directory: %s", absBundlePath)
+	}
+
+	cfg, err := brainconfig.Load()
+	if err != nil {
+		return err
+	}
+
+	name := strings.TrimSpace(*projectName)
+	if _, exists := cfg.Projects[name]; exists {
+		return fmt.Errorf("project %q already exists — use `brain okf register` to update its bundle", name)
+	}
+
+	// Generate stable IDs locally — no server call
+	projectID := uuid.New().String()
+	bundleID   := uuid.New().String()
+
+	cfg.Projects[name] = brainconfig.ProjectConfig{
+		ProjectID:      projectID,
+		LocalOnly:      true,
+		OKFBundlePath:  absBundlePath,
+		OKFVisibility:  "local",
+		OKFBundleID:    bundleID,
+	}
+
+	// Build the index before saving
+	if err := okf.BuildIndex(projectID, bundleID, absBundlePath); err != nil {
+		return fmt.Errorf("build OKF index: %w", err)
+	}
+
+	nConcepts := countMDFiles(absBundlePath)
+
+	if err := brainconfig.Save(cfg); err != nil {
+		return fmt.Errorf("save config: %w", err)
+	}
+
+	fmt.Printf("✅ Local OKF project %q created and indexed (%d concepts)\n", name, nConcepts)
+	fmt.Printf("   bundle: %s\n", absBundlePath)
+	fmt.Println()
+	fmt.Println("  Tips:")
+	fmt.Println("  brain okf list     --project " + name)
+	fmt.Println("  brain okf validate --project " + name)
+	fmt.Println("  brain okf register --project " + name + "  (re-index after editing)")
+	return nil
+}
+
+func runOKFRegister(args []string) error {
+	fs := flag.NewFlagSet("okf register", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	projectName := fs.String("project", "", "project name")
+	bundlePath := fs.String("bundle", "", "path to OKF bundle directory")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("parse flags: %w", err)
+	}
+	if strings.TrimSpace(*projectName) == "" {
+		return fmt.Errorf("--project is required")
+	}
+	if strings.TrimSpace(*bundlePath) == "" {
+		return fmt.Errorf("--bundle is required")
+	}
+
+	absBundlePath, err := filepath.Abs(strings.TrimSpace(*bundlePath))
+	if err != nil {
+		return fmt.Errorf("resolve bundle path: %w", err)
+	}
+	info, err := os.Stat(absBundlePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("bundle path does not exist: %s", absBundlePath)
+		}
+		return fmt.Errorf("stat bundle path: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("bundle path must be a directory: %s", absBundlePath)
+	}
+
+	cfg, err := brainconfig.Load()
+	if err != nil {
+		return err
+	}
+
+	name := strings.TrimSpace(*projectName)
+	project, ok := cfg.Projects[name]
+	if !ok {
+		return fmt.Errorf("project %q not found — run `brain register` first", name)
+	}
+
+	// Advisory warning if bundle is inside repo path
+	if repoPath := strings.TrimSpace(project.RepoPath); repoPath != "" {
+		absRepo, err := filepath.Abs(repoPath)
+		if err == nil {
+			rel, err := filepath.Rel(absRepo, absBundlePath)
+			if err == nil && !strings.HasPrefix(rel, "..") {
+				fmt.Fprintf(os.Stderr, "⚠️  Bundle path is inside repo path — consider placing it outside the repository\n")
+			}
+		}
+	}
+
+	// Reuse existing bundleID if already registered — prevents orphaned DBs.
+	// Generate a new UUID only on first registration.
+	bundleID := strings.TrimSpace(project.OKFBundleID)
+	if bundleID == "" {
+		bundleID = uuid.New().String()
+	}
+	project.OKFBundlePath = absBundlePath
+	project.OKFVisibility = "local"
+	project.OKFBundleID = bundleID
+	cfg.Projects[name] = project
+
+	// Build the index before saving config (validates the bundle is usable)
+	projectID := strings.TrimSpace(project.ProjectID)
+	if err := okf.BuildIndex(projectID, bundleID, absBundlePath); err != nil {
+		return fmt.Errorf("build OKF index: %w", err)
+	}
+
+	// Count indexed concepts by walking the bundle
+	nConcepts := countMDFiles(absBundlePath)
+
+	if err := brainconfig.Save(cfg); err != nil {
+		return fmt.Errorf("save config: %w", err)
+	}
+
+	fmt.Printf("✅ OKF bundle registered and indexed (%d concepts)\n", nConcepts)
+	return nil
+}
+
+// countMDFiles returns the total number of .md files in dir (recursive).
+func countMDFiles(dir string) int {
+	n := 0
+	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() && strings.HasSuffix(info.Name(), ".md") {
+			n++
+		}
+		return nil
+	})
+	return n
+}
+
+func runOKFGenerate(args []string) error {
+	fs := flag.NewFlagSet("okf generate", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	projectName := fs.String("project", "", "project name")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("parse flags: %w", err)
+	}
+	if strings.TrimSpace(*projectName) == "" {
+		return fmt.Errorf("--project is required")
+	}
+
+	cfg, err := brainconfig.Load()
+	if err != nil {
+		return err
+	}
+
+	name := strings.TrimSpace(*projectName)
+	project, ok := cfg.Projects[name]
+	if !ok {
+		return fmt.Errorf("project %q not found — run `brain register` first", name)
+	}
+	if strings.TrimSpace(project.OKFBundlePath) == "" {
+		return fmt.Errorf("project %q has no OKF bundle registered — run `brain okf register` first", name)
+	}
+
+	projectID := strings.TrimSpace(project.ProjectID)
+	bundlePath := strings.TrimSpace(project.OKFBundlePath)
+
+	n, err := okf.GenerateDrafts(projectID, bundlePath)
+	if err != nil {
+		return fmt.Errorf("generate drafts: %w", err)
+	}
+
+	fmt.Printf("✅ Generated %d draft concepts → %s\n", n, bundlePath)
+	return nil
+}
+
+func runOKFList(args []string) error {
+	fs := flag.NewFlagSet("okf list", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	projectName := fs.String("project", "", "project name")
+	statusFilter := fs.String("status", "", "filter by status: draft|stable|deprecated")
+	staleOnly := fs.Bool("stale", false, "show only concepts past stale_after date")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("parse flags: %w", err)
+	}
+	if strings.TrimSpace(*projectName) == "" {
+		return fmt.Errorf("--project is required")
+	}
+
+	cfg, err := brainconfig.Load()
+	if err != nil {
+		return err
+	}
+
+	name := strings.TrimSpace(*projectName)
+	project, ok := cfg.Projects[name]
+	if !ok {
+		return fmt.Errorf("project %q not found — run `brain register` first", name)
+	}
+	if strings.TrimSpace(project.OKFBundlePath) == "" {
+		return fmt.Errorf("project %q has no OKF bundle registered — run `brain okf register` first", name)
+	}
+
+	bundlePath := strings.TrimSpace(project.OKFBundlePath)
+
+	now := time.Now().UTC()
+	type row struct {
+		id         string
+		ctype      string
+		status     string
+		tier       string
+		staleAfter string
+		stale      bool
+	}
+
+	var rows []row
+	filepath.Walk(bundlePath, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() || !strings.HasSuffix(info.Name(), ".md") {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		rel, _ := filepath.Rel(bundlePath, path)
+		conceptID := strings.TrimSuffix(filepath.ToSlash(rel), ".md")
+		concept, err := okf.ParseConcept(conceptID, string(data))
+		if err != nil {
+			return nil
+		}
+
+		if *statusFilter != "" && concept.Status != strings.TrimSpace(*statusFilter) {
+			return nil
+		}
+
+		stale := false
+		if concept.StaleAfter != "" {
+			t, parseErr := time.Parse("2006-01-02", concept.StaleAfter)
+			if parseErr == nil {
+				stale = now.After(t)
+			}
+		}
+
+		if *staleOnly && !stale {
+			return nil
+		}
+
+		rows = append(rows, row{
+			id:         concept.ConceptID,
+			ctype:      concept.Type,
+			status:     concept.Status,
+			tier:       concept.TrustTier,
+			staleAfter: concept.StaleAfter,
+			stale:      stale,
+		})
+		return nil
+	})
+
+	if len(rows) == 0 {
+		fmt.Println("No concepts found.")
+		return nil
+	}
+
+	fmt.Printf("%-40s  %-14s  %-12s  %-18s  %-12s  %s\n",
+		"CONCEPT ID", "TYPE", "STATUS", "TRUST TIER", "STALE AFTER", "STALE?")
+	fmt.Printf("%-40s  %-14s  %-12s  %-18s  %-12s  %s\n",
+		strings.Repeat("─", 40), strings.Repeat("─", 14), strings.Repeat("─", 12),
+		strings.Repeat("─", 18), strings.Repeat("─", 12), strings.Repeat("─", 6))
+
+	for _, r := range rows {
+		staleStr := ""
+		if r.stale {
+			staleStr = "⚠️"
+		}
+		sa := r.staleAfter
+		if sa == "" {
+			sa = "—"
+		}
+		fmt.Printf("%-40s  %-14s  %-12s  %-18s  %-12s  %s\n",
+			truncate(r.id, 40), truncate(r.ctype, 14), r.status,
+			truncate(r.tier, 18), sa, staleStr)
+	}
+	fmt.Println()
+	return nil
+}
+
+func runOKFValidate(args []string) error {
+	fs := flag.NewFlagSet("okf validate", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	projectName := fs.String("project", "", "project name")
+	checkRefs := fs.Bool("refs", false, "cross-check source_files against local snapshot")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("parse flags: %w", err)
+	}
+	if strings.TrimSpace(*projectName) == "" {
+		return fmt.Errorf("--project is required")
+	}
+
+	cfg, err := brainconfig.Load()
+	if err != nil {
+		return err
+	}
+
+	name := strings.TrimSpace(*projectName)
+	project, ok := cfg.Projects[name]
+	if !ok {
+		return fmt.Errorf("project %q not found — run `brain register` first", name)
+	}
+	if strings.TrimSpace(project.OKFBundlePath) == "" {
+		return fmt.Errorf("project %q has no OKF bundle registered — run `brain okf register` first", name)
+	}
+
+	bundlePath := strings.TrimSpace(project.OKFBundlePath)
+
+	// Load snapshot for --refs cross-check
+	var snapshotFiles map[string]struct{}
+	if *checkRefs {
+		snap, snapErr := indexer.LoadSnapshot(strings.TrimSpace(project.ProjectID))
+		if snapErr != nil {
+			fmt.Fprintf(os.Stderr, "⚠️  Could not load snapshot for --refs check: %v\n", snapErr)
+		} else {
+			snapshotFiles = make(map[string]struct{}, len(snap.Files))
+			for f := range snap.Files {
+				snapshotFiles[f] = struct{}{}
+			}
+		}
+	}
+
+	valid, warnings, errors := 0, 0, 0
+	filepath.Walk(bundlePath, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() || !strings.HasSuffix(info.Name(), ".md") {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  ❌ %s: read error: %v\n", path, err)
+			errors++
+			return nil
+		}
+		rel, _ := filepath.Rel(bundlePath, path)
+		conceptID := strings.TrimSuffix(filepath.ToSlash(rel), ".md")
+		concept, parseErr := okf.ParseConcept(conceptID, string(data))
+		if parseErr != nil {
+			fmt.Fprintf(os.Stderr, "  ❌ %s: parse error: %v\n", path, parseErr)
+			errors++
+			return nil
+		}
+
+		// Required field validation
+		fileErrors := 0
+		if strings.TrimSpace(concept.Type) == "" {
+			fmt.Fprintf(os.Stderr, "  ❌ %s: missing required field 'type'\n", path)
+			fileErrors++
+		}
+		if strings.TrimSpace(concept.Title) == "" {
+			fmt.Fprintf(os.Stderr, "  ❌ %s: missing required field 'title'\n", path)
+			fileErrors++
+		}
+		if strings.TrimSpace(concept.Status) == "" {
+			fmt.Fprintf(os.Stderr, "  ❌ %s: missing required field 'status'\n", path)
+			fileErrors++
+		}
+		if fileErrors > 0 {
+			errors++
+			return nil
+		}
+
+		// --refs: cross-check source_files against snapshot
+		if *checkRefs && snapshotFiles != nil {
+			for _, srcFile := range concept.SourceFiles {
+				if _, found := snapshotFiles[srcFile]; !found {
+					fmt.Fprintf(os.Stderr, "  ⚠️  %s: source_file %q not in snapshot\n", path, srcFile)
+					warnings++
+				}
+			}
+		}
+
+		valid++
+		return nil
+	})
+
+	fmt.Printf("\n%d valid, %d warnings, %d errors\n", valid, warnings, errors)
+	if errors > 0 {
+		return fmt.Errorf("validation failed: %d error(s)", errors)
+	}
+	return nil
 }

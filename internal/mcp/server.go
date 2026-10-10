@@ -8,6 +8,7 @@ import (
 	"time"
 
 	brainconfig "github.com/Gentleman-Programming/brain-context/internal/config"
+	"github.com/Gentleman-Programming/brain-context/internal/okf"
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -23,9 +24,10 @@ type Server struct {
 	globalExclude    []string // from config top-level
 	globalInclude    []string // from config top-level
 	projectsByID     map[string]brainconfig.ProjectConfig
-	projectsByName   map[string]string // name → project_id
+	projectsByName   map[string]string                     // name → project_id
 	solutionsByName  map[string]brainconfig.SolutionConfig // lowercase name → SolutionConfig
 	httpClient       *http.Client
+	okfIndex         *okf.Index // nil when no OKF bundles are registered
 }
 
 func New(defaultProjectName string) (*Server, error) {
@@ -66,6 +68,14 @@ func New(defaultProjectName string) (*Server, error) {
 			return nil, projectNotRegisteredError{name: strings.TrimSpace(defaultProjectName)}
 		}
 		srv.defaultProjectID = strings.TrimSpace(project.ProjectID)
+	}
+
+	// OKF index — non-fatal if it fails (nil index = OKF gate skipped at query time)
+	idx, err := okf.OpenIndex(cfg.Projects)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[brain-context] OKF index load warning: %v\n", err)
+	} else {
+		srv.okfIndex = idx
 	}
 
 	return srv, nil
