@@ -37,10 +37,16 @@ type ProjectConfig struct {
 	RepoPath        string   `yaml:"repo_path"`
 	EmbedModel      string   `yaml:"embed_model"`
 	EmbedAPIKey     string   `yaml:"embed_api_key"`      // plaintext — only set by admin locally
-	EmbedAPIKeyEnc  string   `yaml:"embed_api_key_enc"`  // AES-256-GCM encrypted — set via brain join
+	EmbedAPIKeyEnc  string   `yaml:"embed_api_key_enc"`  // Deprecated: no longer written by brain join (secure-invite redesign).
+	                                                       // Kept for backward compat with configs created before the migration.
 	EmbedDimensions int      `yaml:"embed_dimensions"`
 	Exclude         []string `yaml:"exclude,omitempty"` // per-project dirs to exclude
 	Include         []string `yaml:"include,omitempty"` // per-project extra extensions to include
+	OKFBundlePath  string  `yaml:"okf_bundle_path,omitempty"`
+	OKFVisibility  string  `yaml:"okf_visibility,omitempty"`  // "local" (default) | "shared" (V2)
+	OKFBundleID    string  `yaml:"okf_bundle_id,omitempty"`   // stable UUID assigned at register
+	OKFThreshold   float64 `yaml:"okf_threshold,omitempty"`   // 0 → runtime default 0.7
+	LocalOnly      bool    `yaml:"local_only,omitempty"`      // true = no server, created by brain okf local
 }
 
 func Path() (string, error) {
@@ -118,8 +124,14 @@ func Validate(cfg Config) error {
 		if name == "" {
 			return fmt.Errorf("project name cannot be empty")
 		}
-		if _, ok := allowedDimensions[project.EmbedDimensions]; !ok {
-			return fmt.Errorf("project %q embed_dimensions must be one of 768, 1024, or 3072", name)
+		// local_only projects have no embed model — skip dimensions validation
+		if !project.LocalOnly {
+			if _, ok := allowedDimensions[project.EmbedDimensions]; !ok {
+				return fmt.Errorf("project %q embed_dimensions must be one of 768, 1024, or 3072", name)
+			}
+		}
+		if project.OKFThreshold != 0 && (project.OKFThreshold < 0.0 || project.OKFThreshold > 1.0) {
+			return fmt.Errorf("project %q okf_threshold must be in [0.0, 1.0]", name)
 		}
 	}
 
@@ -193,6 +205,11 @@ func normalize(cfg *Config) {
 		project.RepoPath = strings.TrimSpace(project.RepoPath)
 		project.EmbedModel = strings.TrimSpace(project.EmbedModel)
 		project.EmbedAPIKey = strings.TrimSpace(project.EmbedAPIKey)
+		project.EmbedAPIKeyEnc = strings.TrimSpace(project.EmbedAPIKeyEnc)
+		project.OKFBundlePath = strings.TrimSpace(project.OKFBundlePath)
+		project.OKFVisibility = strings.TrimSpace(project.OKFVisibility)
+		project.OKFBundleID   = strings.TrimSpace(project.OKFBundleID)
+		// LocalOnly: bool — no trim needed
 		projects[trimmedName] = project
 	}
 	cfg.Projects = projects

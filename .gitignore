@@ -28,6 +28,7 @@ pgdata/
 # Build artifacts
 dist/
 bin/
+brain.exe
 
 # Cryptographic material — NEVER commit these
 *.pem
@@ -48,3 +49,6 @@ config.local.*
 *.local.yml
 *.local.json
 secrets/
+
+# Local documentation
+docs/

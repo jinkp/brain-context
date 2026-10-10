@@ -145,7 +145,6 @@ func (h *Handler) RedeemInvite(c echo.Context) error {
 		"project_name":      config.ProjectName,
 		"embed_model":       config.EmbedModel,
 		"embed_dimensions":  config.EmbedDimensions,
-		"embed_api_key_enc": config.EmbedAPIKeyEnc,
 		"mcp_read_key":      config.MCPReadKey,
 		"message":           "Store your mcp_read_key securely — shown once.",
 	})

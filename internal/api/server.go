@@ -50,6 +50,16 @@ func NewServer(st *store.Store) *echo.Echo {
 	projectOnly := authed.Group("", RequireScopes(auth.ScopeProject))
 	projectOnly.POST("/projects/:id/chunks", h.UploadChunks)
 
+	// Read-only endpoints require a valid scoped token (ScopeTenant, ScopeProject,
+	// or ScopeMCPRead). Token auth acts as the primary rate-control mechanism.
+	//
+	// Rate limiting evaluation (server-side embedding load):
+	// SearchContext now generates the query embedding server-side, adding an
+	// external provider call per request. Current mitigation: token auth limits
+	// blast radius per client. If embedding latency becomes a bottleneck under
+	// load, consider adding a per-project or per-token rate limiter here using
+	// newAuthRateLimiter() with a higher burst allowance (e.g. Rate=10, Burst=20).
+	// Track via the embed_ms column in query_logs before adjusting.
 	readOnly := authed.Group("", RequireScopes(auth.ScopeTenant, auth.ScopeProject, auth.ScopeMCPRead))
 	readOnly.POST("/projects/:id/context/search", h.SearchContext)
 	readOnly.GET("/projects/:id/files/summary", h.GetFileSummary)
