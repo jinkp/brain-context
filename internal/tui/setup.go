@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/Gentleman-Programming/brain-context/internal/config"
@@ -155,6 +156,9 @@ func setupClaude(home, brainExe string) error {
 			return setupClaudeLegacy(home, brainExe)
 		}
 	}
+	if err := repairClaudePluginScriptPermissions(home); err != nil {
+		fmt.Fprintf(os.Stderr, "  warning: could not repair Claude plugin hook permissions: %v\n", err)
+	}
 
 	// 3. Write durable user-level MCP config at ~/.claude/mcp/brain-context.json
 	//    This uses the absolute binary path so MCP subprocesses don't need PATH.
@@ -181,6 +185,23 @@ func setupClaude(home, brainExe string) error {
 		fmt.Fprintf(os.Stderr, "  protocol injection skipped: %v\n", err)
 	}
 
+	return nil
+}
+
+func repairClaudePluginScriptPermissions(home string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	pattern := filepath.Join(home, ".claude", "plugins", "cache", "brain-context", "brain-context", "*", "scripts", "*.sh")
+	paths, err := filepath.Glob(pattern)
+	if err != nil {
+		return fmt.Errorf("glob plugin scripts: %w", err)
+	}
+	for _, path := range paths {
+		if chmodErr := os.Chmod(path, 0o755); chmodErr != nil {
+			return fmt.Errorf("chmod %s: %w", path, chmodErr)
+		}
+	}
 	return nil
 }
 
