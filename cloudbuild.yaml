@@ -1,0 +1,11 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - Dockerfile.api
+      - -t
+      - us-central1-docker.pkg.dev/brain-context-prod/brain-context/api:v0.8.4
+      - .
+images:
+  - us-central1-docker.pkg.dev/brain-context-prod/brain-context/api:v0.8.4
