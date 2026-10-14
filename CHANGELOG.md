@@ -4,12 +4,7 @@ All notable changes to brain-context are documented here.
 
 ---
 
-## [Unreleased]
-
-### Bug Fixes (OKF — found during sandbox testing)
-
-- Fixed `BuildIndex`, `CheckStaleness`, `runOKFList`, `runOKFValidate`, and `countMDFiles` to walk bundle directories recursively (`filepath.Walk`) instead of only reading the root level (`os.ReadDir`). Concepts in subdirectories were silently ignored.
-- Fixed `brain okf register` to reuse the existing `bundleID` when called on an already-registered bundle, preventing orphaned SQLite DB files on every re-registration.
+## [v0.8.0] — 2026-10-14
 
 ### OKF Knowledge Layer (V1 — Local Only)
 
@@ -17,6 +12,7 @@ brain-context now supports OKF (Open Knowledge Format v0.2) knowledge bundles as
 
 **New commands:**
 - `brain okf register --project <name> --bundle <path>` — register and index an OKF bundle
+- `brain okf local --project <name> --bundle <path>` — create a local-only knowledge project (no server required)
 - `brain okf generate --project <name>` — auto-generate draft concepts from the RAG index
 - `brain okf list --project <name> [--status draft|stable|deprecated] [--stale]` — list concepts
 - `brain okf validate --project <name> [--refs]` — validate frontmatter and source file references
@@ -28,18 +24,53 @@ brain-context now supports OKF (Open Knowledge Format v0.2) knowledge bundles as
 
 **Migration:** no migration required. OKF is purely additive — existing configs and MCP behavior are unchanged when no bundles are registered.
 
-### Added
+### Local Query Cache (Phase 1)
 
-- **Server-side query embedding**: `SearchContext` now generates the query embedding on the server using the project's stored (encrypted) provider key. Clients send a plain-text `query` string — no embed API key required on the client.
-- **Secure invite model**: `brain join` no longer stores `embed_api_key_enc` in the local config. Invited members receive only a scoped `mcp_read_key` (`brn_mcp_xxx`) to access MCP read tools.
-- **Team collaboration docs**: README updated with `brain invite` / `brain join` workflow and security boundary explanation.
-- **Latency metrics**: `query_logs` table records per-stage latency (`embed_ms`, `vector_ms`, `rerank_ms`, `metrics_ms`, `total_ms`) exposed via `GET /api/metrics`.
+brain-context now caches MCP search responses locally in `~/.brain/context-cache.db`.
 
-### Changed
+**How it works:** Before calling the API, the MCP server fetches the project's remote freshness state (`last_indexed`, `embed_model`, `embed_dimensions`). If a matching non-expired entry exists in the local SQLite cache, it is returned immediately — zero API cost. Cache entries are automatically invalidated when the project is re-indexed.
 
-- `redeemInviteResponse` struct in the CLI no longer includes `embed_api_key_enc`; the field was removed from the API response in the prior release.
-- `brain join` write path no longer sets `embed_api_key_enc` in `~/.brain/config.yaml`.
-- `ProjectConfig.EmbedAPIKeyEnc` is **deprecated**: no new code writes it; existing configs are still read for backward compatibility.
+**New commands:**
+- `brain cache status --project <name>` — show local cache entries and freshness state
+- `brain cache clear --project <name>` — delete cache entries for a project
+- `brain cache prune` — delete all expired cache entries
+
+**Default TTL:** 24 hours. Cache is advisory only — any network error during freshness validation bypasses the cache transparently.
+
+### Local Telemetry
+
+Every `search_project_context` and `explain_flow` call now records a query event locally, tracking which layer answered the query (OKF, cache, or API) and the end-to-end latency.
+
+**New command:**
+- `brain metrics local [--project <name>]` — show OKF/cache hit rates and latency breakdown
+
+**Example output:**
+```
+Local telemetry — my-project
+
+Total queries:     47
+Source breakdown:
+  OKF (local):     31  (66.0%)
+  Cache (local):    8  (17.0%)
+  API (remote):     8  (17.0%)
+Local resolution:  83.0% (queries answered without API call)
+Avg latency:       12ms
+Avg OKF score:     0.8734
+```
+
+### Secure Invite Model
+
+- `brain join` no longer stores `embed_api_key_enc` in the local config. Invited members receive only a scoped `mcp_read_key` (`brn_mcp_xxx`).
+- `ProjectConfig.EmbedAPIKeyEnc` is deprecated — no new code writes it; existing configs are still read for backward compatibility.
+
+### Server-side query embedding
+
+`SearchContext` now generates the query embedding on the server using the project's stored (encrypted) provider key. Clients send a plain-text `query` string — no embed API key required on the client side.
+
+### Bug Fixes
+
+- Fixed `BuildIndex`, `CheckStaleness`, `runOKFList`, `runOKFValidate`, and `countMDFiles` to walk bundle directories recursively (`filepath.Walk`) instead of only reading the root level (`os.ReadDir`). Concepts in subdirectories were silently ignored.
+- Fixed `brain okf register` to reuse the existing `bundleID` when called on an already-registered bundle, preventing orphaned SQLite DB files on every re-registration.
 
 ### Migration Notes
 
@@ -50,10 +81,6 @@ The API still accepts `query_embedding` alongside the new `query` field for back
 #### Clients with `embed_api_key_enc` in local config
 
 If your `~/.brain/config.yaml` contains `embed_api_key_enc` (set by a pre-migration `brain join`), it will continue to work for local indexing flows. Run `brain join` again to get a fresh config without the deprecated field.
-
-#### Revocation of pre-migration invite configs
-
-If you want to invalidate configs written before this change (which stored `embed_api_key_enc`), revoke the affected project tokens via `brain projects tokens` and re-issue fresh invites.
 
 ---
 

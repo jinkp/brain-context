@@ -33,7 +33,7 @@ import (
 	"github.com/google/uuid"
 )
 
-var version = "v0.7.0" // overridden by -ldflags at build time
+var version = "v0.8.0" // overridden by -ldflags at build time
 
 var httpClient = &http.Client{Timeout: 30 * time.Second}
 
