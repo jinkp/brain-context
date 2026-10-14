@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -18,7 +19,10 @@ const (
 	ScopeProject TokenScope = "project"
 	ScopeMCPRead TokenScope = "mcp_read"
 
-	TokenTTL              = 90 * 24 * time.Hour
+	// DefaultTokenTTL is used when BRAIN_TOKEN_TTL is not set.
+	// 1 year — long enough to not interrupt self-hosted workflows.
+	DefaultTokenTTL = 365 * 24 * time.Hour
+
 	tokenRandomByteLength = 32
 	keyPrefixSecretLength = 12
 
@@ -26,6 +30,26 @@ const (
 	projectTokenPrefix = "brn_proj"
 	mcpReadTokenPrefix = "brn_mcp"
 )
+
+// TokenTTL returns the effective token TTL.
+// Reads BRAIN_TOKEN_TTL env var (e.g. "8760h", "43800h").
+// Falls back to DefaultTokenTTL when unset or unparseable.
+// A value of "0" or "0h" means no expiration (set to 100 years).
+func TokenTTL() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("BRAIN_TOKEN_TTL"))
+	if raw == "" {
+		return DefaultTokenTTL
+	}
+	// "0" or "0h" → effectively never expires
+	if raw == "0" || raw == "0h" {
+		return 100 * 365 * 24 * time.Hour
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return DefaultTokenTTL
+	}
+	return d
+}
 
 var (
 	ErrInvalidScope = errors.New("invalid token scope")
@@ -76,7 +100,7 @@ func IssueToken(scope TokenScope, now time.Time) (IssuedToken, error) {
 		Raw:       raw,
 		KeyPrefix: deriveKeyPrefix(raw),
 		Scope:     scope,
-		ExpiresAt: now.UTC().Add(TokenTTL),
+		ExpiresAt: now.UTC().Add(TokenTTL()),
 		Hash:      string(hash),
 	}, nil
 }
