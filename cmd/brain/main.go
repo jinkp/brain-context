@@ -111,6 +111,8 @@ func main() {
 		err = runOKF(os.Args[2:])
 	case "cache":
 		err = runCache(os.Args[2:])
+	case "key":
+		err = runKey(os.Args[2:])
 	case "solution":
 		err = runSolution(os.Args[2:])
 	case "version":
@@ -407,8 +409,9 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  brain projects delete --project <name>  remove a project")
 	fmt.Fprintln(os.Stderr, "  brain projects rename --project <old> --name <new>  rename a project")
 	fmt.Fprintln(os.Stderr, "  brain scan           --project <name> [--stack <stack>]  preview which files would be indexed")
-	fmt.Fprintln(os.Stderr, "  brain metrics        [--from YYYY-MM-DD] [--to YYYY-MM-DD]  server usage analytics")
-	fmt.Fprintln(os.Stderr, "  brain metrics local  [--project <name>]                    local OKF/cache hit rates")
+	fmt.Fprintln(os.Stderr, "  brain key set        --project <name|.>  --embed-api-key <key>  update embed API key")
+	fmt.Fprintln(os.Stderr, "  brain metrics        [--from YYYY-MM-DD] [--to YYYY-MM-DD]      server usage analytics")
+	fmt.Fprintln(os.Stderr, "  brain metrics local  [--project <name>]                         local OKF/cache hit rates")
 	fmt.Fprintln(os.Stderr, "  brain mcp            [--project <name>]")
 	fmt.Fprintln(os.Stderr, "  brain solution create --name <n> --projects proj1,proj2,proj3")
 	fmt.Fprintln(os.Stderr, "  brain solution list")
@@ -986,6 +989,40 @@ func runTokensRenew(args []string) error {
 	fmt.Println()
 	fmt.Println("✅ Config updated at ~/.brain/config.yaml")
 	return nil
+}
+
+// resolveProjectName resolves "." to the registered project whose RepoPath
+// matches the current working directory. Any other value is returned unchanged.
+// Returns an error when "." is used but no matching project is found.
+func resolveProjectName(name string) (string, error) {
+	if strings.TrimSpace(name) != "." {
+		return name, nil
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("get working directory: %w", err)
+	}
+	// Normalise to absolute path with clean separators.
+	cwd, err = filepath.Abs(cwd)
+	if err != nil {
+		return "", fmt.Errorf("resolve cwd: %w", err)
+	}
+
+	cfg, err := brainconfig.Load()
+	if err != nil {
+		return "", err
+	}
+	for projName, proj := range cfg.Projects {
+		repoAbs, absErr := filepath.Abs(strings.TrimSpace(proj.RepoPath))
+		if absErr != nil {
+			continue
+		}
+		if strings.EqualFold(repoAbs, cwd) {
+			return projName, nil
+		}
+	}
+	return "", fmt.Errorf("no registered project found for current directory %q\n"+
+		"  Hint: run 'brain projects' to list registered projects, or use --project <name>", cwd)
 }
 
 // loadProjectConfig is a helper shared by tokens subcommands.
@@ -2717,5 +2754,108 @@ func runMetricsLocal(args []string) error {
 
 	dbPath, _ := cache.DBPath()
 	fmt.Printf("\nEvent log: %s\n", dbPath)
+	return nil
+}
+
+// ── key ───────────────────────────────────────────────────────────────────────
+
+func runKey(args []string) error {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage:")
+		fmt.Fprintln(os.Stderr, "  brain key set  --project <name|.>  --embed-api-key <key>")
+		return nil
+	}
+	switch args[0] {
+	case "set":
+		return runKeySet(args[1:])
+	default:
+		fmt.Fprintln(os.Stderr, "usage:")
+		fmt.Fprintln(os.Stderr, "  brain key set  --project <name|.>  --embed-api-key <key>")
+		return nil
+	}
+}
+
+func runKeySet(args []string) error {
+	fs := flag.NewFlagSet("key set", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	projectFlag := fs.String("project", ".", "project name, or '.' to auto-detect from current directory")
+	embedAPIKey := fs.String("embed-api-key", "", "new embed API key (e.g. sk-...)")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("parse flags: %w", err)
+	}
+
+	// Resolve "." → project name from cwd
+	projectName, err := resolveProjectName(*projectFlag)
+	if err != nil {
+		return err
+	}
+
+	if strings.TrimSpace(*embedAPIKey) == "" {
+		return fmt.Errorf("--embed-api-key is required")
+	}
+
+	cfg, err := brainconfig.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	if strings.TrimSpace(cfg.TenantToken) == "" {
+		return fmt.Errorf("not logged in — run 'brain login' first")
+	}
+
+	project, ok := cfg.Projects[projectName]
+	if !ok {
+		return fmt.Errorf("project %q not found — run 'brain projects' to list registered projects", projectName)
+	}
+	projectID := strings.TrimSpace(project.ProjectID)
+	if projectID == "" {
+		return fmt.Errorf("project %q has no project_id — try re-registering with 'brain register'", projectName)
+	}
+
+	fmt.Printf("Updating embed API key for project %q...\n", projectName)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	endpoint := strings.TrimRight(cfg.APIEndpoint, "/") + "/api/projects/" + projectID + "/embed-key"
+	body, _ := json.Marshal(map[string]string{"embed_api_key": strings.TrimSpace(*embedAPIKey)})
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(cfg.TenantToken))
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("update embed key: %w", err)
+	}
+	defer resp.Body.Close()
+
+	data, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode == http.StatusServiceUnavailable {
+		return fmt.Errorf("server encryption not configured (BRAIN_ENCRYPTION_KEY missing on server)")
+	}
+	if resp.StatusCode >= 400 {
+		var apiErr apiErrorResponse
+		if json.Unmarshal(data, &apiErr) == nil && apiErr.Error != "" {
+			return fmt.Errorf("API error: %s", apiErr.Error)
+		}
+		return fmt.Errorf("request failed: %s", resp.Status)
+	}
+
+	// Also update the local config so brain index uses the new key immediately.
+	project.EmbedAPIKey = strings.TrimSpace(*embedAPIKey)
+	cfg.Projects[projectName] = project
+	if err := brainconfig.Save(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: key updated on server but failed to save locally: %v\n", err)
+	}
+
+	fmt.Printf("✓ Embed API key updated for project %q\n", projectName)
+	fmt.Println("  Server: key stored encrypted ✓")
+	fmt.Println("  Local:  config updated ✓")
+	fmt.Println()
+	fmt.Println("Run 'brain update' to re-index with the new key.")
 	return nil
 }
