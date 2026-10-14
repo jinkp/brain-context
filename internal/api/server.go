@@ -45,6 +45,9 @@ func NewServer(st *store.Store) *echo.Echo {
 	tenantOnly.POST("/projects/:id/tokens/renew", h.RenewProjectTokens, authRL)
 	tenantOnly.POST("/projects/:id/invite", h.CreateInvite)
 
+	// Admin — protected by BRAIN_ADMIN_SECRET env var (not DB auth)
+	apiGroup.POST("/admin/recover-tenant-key", h.RecoverTenantKey, adminSecretMiddleware())
+
 	// Public — no auth needed, the invite code IS the auth — rate-limited
 	apiGroup.POST("/invite/redeem", h.RedeemInvite, publicRL)
 

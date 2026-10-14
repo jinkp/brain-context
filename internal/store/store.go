@@ -497,6 +497,50 @@ func (s *Store) withTx(ctx context.Context, fn func(tx pgx.Tx) error) error {
 	return nil
 }
 
+// RecoverTenantKey issues a fresh tenant API key for the tenant that owns
+// the given key_prefix — regardless of whether the existing key is expired
+// or revoked. Intended for admin recovery only; must be called from a
+// handler protected by BRAIN_ADMIN_SECRET.
+//
+// The old key is revoked and the new key is returned.
+func (s *Store) RecoverTenantKey(ctx context.Context, keyPrefix string, newKey auth.IssuedToken) (APIKeyRecord, error) {
+	var record APIKeyRecord
+
+	err := s.withTx(ctx, func(tx pgx.Tx) error {
+		// Find the tenant that owns this key prefix — ignore expiry and revoked status.
+		var tenantID uuid.UUID
+		var oldKeyID uuid.UUID
+		err := tx.QueryRow(ctx, `
+			SELECT id, tenant_id FROM api_keys
+			WHERE key_prefix = $1 AND scope = 'tenant'
+			ORDER BY created_at DESC
+			LIMIT 1
+		`, keyPrefix).Scan(&oldKeyID, &tenantID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("%w: no tenant key found with prefix %q", ErrNotFound, keyPrefix)
+			}
+			return fmt.Errorf("lookup key by prefix: %w", err)
+		}
+
+		// Revoke the old key.
+		if _, err := tx.Exec(ctx, `
+			UPDATE api_keys SET revoked_at = $1
+			WHERE id = $2 AND revoked_at IS NULL
+		`, time.Now().UTC(), oldKeyID); err != nil {
+			return fmt.Errorf("revoke old key: %w", err)
+		}
+
+		// Issue a new key for the same tenant.
+		record = newAPIKeyRecord(tenantID, nil, newKey)
+		return insertAPIKey(ctx, tx, record)
+	})
+	if err != nil {
+		return APIKeyRecord{}, err
+	}
+	return record, nil
+}
+
 func insertAPIKey(ctx context.Context, exec DBTX, record APIKeyRecord) error {
 	if _, err := exec.Exec(ctx, `
 		insert into api_keys (id, tenant_id, project_id, key_prefix, secret_hash, scope, expires_at, revoked_at, created_at)

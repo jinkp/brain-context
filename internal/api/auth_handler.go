@@ -11,6 +11,27 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
+// adminSecretMiddleware protects admin endpoints with a static secret read from
+// the BRAIN_ADMIN_SECRET environment variable. If the env var is not set, the
+// endpoint is disabled (503) to prevent accidental exposure.
+func adminSecretMiddleware() echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			secret := strings.TrimSpace(os.Getenv("BRAIN_ADMIN_SECRET"))
+			if secret == "" {
+				return writeError(c, http.StatusServiceUnavailable,
+					"ADMIN_DISABLED",
+					"admin endpoints are disabled — set BRAIN_ADMIN_SECRET on the server to enable")
+			}
+			provided := strings.TrimPrefix(c.Request().Header.Get("Authorization"), "Bearer ")
+			if strings.TrimSpace(provided) != secret {
+				return writeError(c, http.StatusUnauthorized, "UNAUTHORIZED", "invalid admin secret")
+			}
+			return next(c)
+		}
+	}
+}
+
 // registrationOpen returns true if tenant self-registration is allowed.
 // Controlled by BRAIN_REGISTRATION env var: "open" (default) or "closed".
 func registrationOpen() bool {
@@ -70,6 +91,43 @@ func (h *Handler) RegisterTenant(c echo.Context) error {
 			ExpiresAt: record.ExpiresAt,
 			Token:     issued.Raw,
 		},
+	})
+}
+
+// RecoverTenantKey issues a fresh tenant API key for the tenant that owns
+// the provided expired or revoked key_prefix. Protected by adminSecretMiddleware.
+// POST /api/admin/recover-tenant-key
+func (h *Handler) RecoverTenantKey(c echo.Context) error {
+	var req struct {
+		KeyPrefix string `json:"key_prefix"`
+	}
+	if err := c.Bind(&req); err != nil || strings.TrimSpace(req.KeyPrefix) == "" {
+		return writeError(c, http.StatusBadRequest, "VALIDATION_ERROR", "key_prefix is required")
+	}
+
+	issued, err := auth.IssueToken(auth.ScopeTenant, time.Now().UTC())
+	if err != nil {
+		return writeError(c, http.StatusInternalServerError, "TOKEN_ISSUE_FAILED", "failed to issue new tenant key")
+	}
+
+	record, err := h.store.RecoverTenantKey(c.Request().Context(), strings.TrimSpace(req.KeyPrefix), issued)
+	if err != nil {
+		log.Printf("[AUDIT] recover-tenant-key FAILED | ip=%s prefix=%q err=%v", c.RealIP(), req.KeyPrefix, err)
+		return handleStoreError(c, err)
+	}
+
+	log.Printf("[AUDIT] recover-tenant-key OK | ip=%s prefix=%q tenant_id=%s new_prefix=%s",
+		c.RealIP(), req.KeyPrefix, record.TenantID, record.KeyPrefix)
+
+	return c.JSON(http.StatusOK, map[string]any{
+		"api_key": tokenPayload{
+			ID:        record.ID.String(),
+			Prefix:    record.KeyPrefix,
+			Scope:     record.Scope,
+			ExpiresAt: record.ExpiresAt,
+			Token:     issued.Raw,
+		},
+		"message": "New tenant API key issued. Old key has been revoked. Run brain login with the new key.",
 	})
 }
 

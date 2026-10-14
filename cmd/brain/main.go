@@ -405,6 +405,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  brain join           --code <brn_invite_xxx>  [--api http://localhost:8080]")
 	fmt.Fprintln(os.Stderr, "  brain tokens list    --project <name>")
 	fmt.Fprintln(os.Stderr, "  brain tokens renew   --project <name>")
+	fmt.Fprintln(os.Stderr, "  brain tokens recover --admin-secret <secret>  recover expired tenant key")
 	fmt.Fprintln(os.Stderr, "  brain projects                  list registered projects")
 	fmt.Fprintln(os.Stderr, "  brain projects delete --project <name>  remove a project")
 	fmt.Fprintln(os.Stderr, "  brain projects rename --project <old> --name <new>  rename a project")
@@ -877,9 +878,10 @@ type renewTokensResponse struct {
 func runTokens(args []string) error {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "Usage:")
-		fmt.Fprintln(os.Stderr, "  brain tokens list  --project <name>")
-		fmt.Fprintln(os.Stderr, "  brain tokens renew --project <name>")
-		return fmt.Errorf("subcommand required: list or renew")
+		fmt.Fprintln(os.Stderr, "  brain tokens list    --project <name>")
+		fmt.Fprintln(os.Stderr, "  brain tokens renew   --project <name>")
+		fmt.Fprintln(os.Stderr, "  brain tokens recover --admin-secret <secret>  (recover expired tenant key)")
+		return fmt.Errorf("subcommand required: list, renew, or recover")
 	}
 
 	switch args[0] {
@@ -887,8 +889,10 @@ func runTokens(args []string) error {
 		return runTokensList(args[1:])
 	case "renew":
 		return runTokensRenew(args[1:])
+	case "recover":
+		return runTokensRecover(args[1:])
 	default:
-		return fmt.Errorf("unknown subcommand %q — use list or renew", args[0])
+		return fmt.Errorf("unknown subcommand %q — use list, renew, or recover", args[0])
 	}
 }
 
@@ -990,6 +994,136 @@ func runTokensRenew(args []string) error {
 	fmt.Println()
 	fmt.Println("✅ Config updated at ~/.brain/config.yaml")
 	return nil
+}
+
+func runTokensRecover(args []string) error {
+	fs := flag.NewFlagSet("tokens recover", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	adminSecret := fs.String("admin-secret", "", "BRAIN_ADMIN_SECRET value set on the server")
+	apiFlag := fs.String("api", "", "API endpoint (optional — reads from config if available)")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("parse flags: %w", err)
+	}
+
+	// Resolve API endpoint: flag > config > error
+	apiEndpoint := strings.TrimSpace(*apiFlag)
+	if apiEndpoint == "" {
+		cfg, err := brainconfig.Load()
+		if err == nil {
+			apiEndpoint = strings.TrimRight(strings.TrimSpace(cfg.APIEndpoint), "/")
+		}
+	}
+	if apiEndpoint == "" {
+		return fmt.Errorf("--api is required (or set via brain login first)")
+	}
+
+	if strings.TrimSpace(*adminSecret) == "" {
+		// Try BRAIN_ADMIN_SECRET env var as fallback
+		*adminSecret = os.Getenv("BRAIN_ADMIN_SECRET")
+	}
+	if strings.TrimSpace(*adminSecret) == "" {
+		return fmt.Errorf("--admin-secret is required (or set BRAIN_ADMIN_SECRET env var)")
+	}
+
+	// Read the expired key prefix from local config so the server can identify the tenant
+	cfg, err := brainconfig.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	oldKey := strings.TrimSpace(cfg.TenantToken)
+	if oldKey == "" {
+		return fmt.Errorf("no tenant token found in local config — run 'brain login' first to store the expired key")
+	}
+
+	// Derive the key prefix from the raw token (same logic as auth.ParseToken / deriveKeyPrefix)
+	keyPrefix := deriveKeyPrefixFromRaw(oldKey)
+	if keyPrefix == "" {
+		return fmt.Errorf("could not derive key prefix from stored token %q", oldKey)
+	}
+
+	fmt.Printf("Recovering tenant key (prefix: %s...)...\n", keyPrefix[:min(len(keyPrefix), 24)])
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	body, _ := json.Marshal(map[string]string{"key_prefix": keyPrefix})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		apiEndpoint+"/api/admin/recover-tenant-key",
+		bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(*adminSecret))
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("recover request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode == http.StatusServiceUnavailable {
+		return fmt.Errorf("admin endpoints are disabled on the server — set BRAIN_ADMIN_SECRET env var in Cloud Run")
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		return fmt.Errorf("invalid admin secret")
+	}
+	if resp.StatusCode >= 400 {
+		var apiErr apiErrorResponse
+		if json.Unmarshal(data, &apiErr) == nil && apiErr.Error != "" {
+			return fmt.Errorf("server error: %s", apiErr.Error)
+		}
+		return fmt.Errorf("request failed: %s", resp.Status)
+	}
+
+	var result struct {
+		APIKey struct {
+			Token     string    `json:"token"`
+			ExpiresAt time.Time `json:"expires_at"`
+		} `json:"api_key"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return fmt.Errorf("parse response: %w", err)
+	}
+
+	newToken := strings.TrimSpace(result.APIKey.Token)
+	if newToken == "" {
+		return fmt.Errorf("server returned empty token")
+	}
+
+	// Save the new token to local config
+	cfg.TenantToken = newToken
+	if err := brainconfig.Save(cfg); err != nil {
+		// Don't fail — print the token so they can save it manually
+		fmt.Fprintf(os.Stderr, "warning: could not save config: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Save this token manually: %s\n", newToken)
+		return nil
+	}
+
+	fmt.Println("✓ Tenant API key recovered and saved to ~/.brain/config.yaml")
+	fmt.Printf("  New key expires: %s\n", result.APIKey.ExpiresAt.Local().Format("2006-01-02"))
+	fmt.Println()
+	fmt.Println("Run 'brain login --api <url>' to verify the new key works.")
+	return nil
+}
+
+// deriveKeyPrefixFromRaw derives the key_prefix stored in the DB from a raw token.
+// Mirrors the logic in internal/auth/tokens.go:deriveKeyPrefix.
+func deriveKeyPrefixFromRaw(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	lastUnderscore := strings.LastIndex(raw, "_")
+	if lastUnderscore == -1 || lastUnderscore == len(raw)-1 {
+		return raw
+	}
+	secret := raw[lastUnderscore+1:]
+	if len(secret) > 12 {
+		secret = secret[:12]
+	}
+	return raw[:lastUnderscore+1] + secret
 }
 
 // resolveProjectName resolves "." to the registered project whose RepoPath
