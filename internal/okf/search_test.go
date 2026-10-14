@@ -150,12 +150,15 @@ tags: [auth, jwt]
 
 func TestQuery_NilIndex(t *testing.T) {
 	var idx *Index
-	result, ok := idx.Query(context.Background(), "any-project", "auth", 0, false)
+	result, score, ok := idx.Query(context.Background(), "any-project", "auth", 0, false)
 	if ok {
 		t.Errorf("nil Index.Query() returned ok=true, want false")
 	}
 	if result != "" {
 		t.Errorf("nil Index.Query() returned non-empty result: %q", result)
+	}
+	if score != 0 {
+		t.Errorf("nil Index.Query() returned non-zero score: %f", score)
 	}
 }
 
@@ -184,7 +187,7 @@ func TestQuery_NoProjectBundles(t *testing.T) {
 	t.Cleanup(func() { idx.Close() })
 
 	// Query with a projectID that has no bundles registered
-	result, ok := idx.Query(context.Background(), "nonexistent-project-id", "auth", 0, false)
+	result, _, ok := idx.Query(context.Background(), "nonexistent-project-id", "auth", 0, false)
 	if ok {
 		t.Errorf("Query with unknown projectID returned ok=true")
 	}
@@ -201,9 +204,12 @@ func TestQuery_HitAboveThreshold(t *testing.T) {
 	})
 
 	// Use a very low threshold so any FTS5 match passes
-	result, ok := idx.Query(context.Background(), "proj-hit", "auth jwt handler", minQueryThreshold, false)
+	result, score, ok := idx.Query(context.Background(), "proj-hit", "auth jwt handler", minQueryThreshold, false)
 	if !ok {
 		t.Fatalf("Query() returned ok=false, expected a hit for query 'auth jwt handler'")
+	}
+	if score <= 0 {
+		t.Errorf("expected positive BM25 score on hit, got %f", score)
 	}
 	if !strings.Contains(result, "[OKF]") {
 		t.Errorf("result does not contain '[OKF]' prefix: %q", result)
@@ -219,7 +225,7 @@ func TestQuery_MissBelowThreshold(t *testing.T) {
 	})
 
 	// Use threshold=1.0 — FTS5 BM25 scores (negated) are never that high
-	result, ok := idx.Query(context.Background(), "proj-miss", "auth", 1.0, false)
+	result, _, ok := idx.Query(context.Background(), "proj-miss", "auth", 1.0, false)
 	if ok {
 		t.Errorf("Query() returned ok=true with threshold=1.0 (should fail threshold gate): result=%q", result)
 	}
@@ -232,7 +238,7 @@ func TestQuery_DeprecatedExcluded(t *testing.T) {
 		"deprecated.md": deprecatedConcept,
 	})
 
-	result, ok := idx.Query(context.Background(), "proj-depr", "auth deprecated old", minQueryThreshold, false)
+	result, _, ok := idx.Query(context.Background(), "proj-depr", "auth deprecated old", minQueryThreshold, false)
 	if ok {
 		t.Errorf("Query() returned ok=true for deprecated concept: %q", result)
 	}
@@ -243,7 +249,7 @@ func TestQuery_DraftExcluded(t *testing.T) {
 		"draft.md": draftConcept,
 	})
 
-	result, ok := idx.Query(context.Background(), "proj-draft", "draft feature wip", minQueryThreshold, false)
+	result, _, ok := idx.Query(context.Background(), "proj-draft", "draft feature wip", minQueryThreshold, false)
 	if ok {
 		t.Errorf("Query() returned ok=true for draft concept: %q", result)
 	}
@@ -257,7 +263,7 @@ func TestQuery_StaleImplType_Excluded(t *testing.T) {
 		"stale-impl.md": staleImplConcept,
 	})
 
-	result, ok := idx.Query(context.Background(), "proj-stale-impl", "stale filesummary handler", minQueryThreshold, false)
+	result, _, ok := idx.Query(context.Background(), "proj-stale-impl", "stale filesummary handler", minQueryThreshold, false)
 	if ok {
 		t.Errorf("Query() returned ok=true for stale impl-type concept (FileSummary past stale_after must be excluded): %q", result)
 	}
@@ -269,7 +275,7 @@ func TestQuery_StaleIntentType_IncludedWithWarning(t *testing.T) {
 		"stale-intent.md": staleIntentConcept,
 	})
 
-	result, ok := idx.Query(context.Background(), "proj-stale-intent", "requirement old", minQueryThreshold, false)
+	result, _, ok := idx.Query(context.Background(), "proj-stale-intent", "requirement old", minQueryThreshold, false)
 	if !ok {
 		t.Fatalf("Query() returned ok=false for stale intent-type concept (should be included with advisory warning)")
 	}
@@ -290,7 +296,7 @@ func TestQuery_TrustTierRanking(t *testing.T) {
 		"unverified.md":     unverifiedConcept,
 	})
 
-	result, ok := idx.Query(context.Background(), "proj-tier", "auth jwt", minQueryThreshold, false)
+	result, _, ok := idx.Query(context.Background(), "proj-tier", "auth jwt", minQueryThreshold, false)
 	if !ok {
 		t.Fatalf("Query() returned ok=false, expected a hit")
 	}

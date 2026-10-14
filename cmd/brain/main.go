@@ -101,7 +101,12 @@ func main() {
 	case "join":
 		err = runJoin(os.Args[2:])
 	case "metrics":
-		err = runMetrics(os.Args[2:])
+		// "brain metrics local" → local telemetry; anything else → server metrics
+		if len(os.Args) > 2 && os.Args[2] == "local" {
+			err = runMetricsLocal(os.Args[3:])
+		} else {
+			err = runMetrics(os.Args[2:])
+		}
 	case "okf":
 		err = runOKF(os.Args[2:])
 	case "cache":
@@ -402,7 +407,8 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  brain projects delete --project <name>  remove a project")
 	fmt.Fprintln(os.Stderr, "  brain projects rename --project <old> --name <new>  rename a project")
 	fmt.Fprintln(os.Stderr, "  brain scan           --project <name> [--stack <stack>]  preview which files would be indexed")
-	fmt.Fprintln(os.Stderr, "  brain metrics        [--from YYYY-MM-DD] [--to YYYY-MM-DD]  usage analytics")
+	fmt.Fprintln(os.Stderr, "  brain metrics        [--from YYYY-MM-DD] [--to YYYY-MM-DD]  server usage analytics")
+	fmt.Fprintln(os.Stderr, "  brain metrics local  [--project <name>]                    local OKF/cache hit rates")
 	fmt.Fprintln(os.Stderr, "  brain mcp            [--project <name>]")
 	fmt.Fprintln(os.Stderr, "  brain solution create --name <n> --projects proj1,proj2,proj3")
 	fmt.Fprintln(os.Stderr, "  brain solution list")
@@ -2634,5 +2640,82 @@ func runCachePrune(args []string) error {
 		return fmt.Errorf("prune cache: %w", err)
 	}
 	fmt.Printf("Pruned %d expired cache entries.\n", n)
+	return nil
+}
+
+// ── metrics local ─────────────────────────────────────────────────────────────
+
+func runMetricsLocal(args []string) error {
+	fs := flag.NewFlagSet("metrics local", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	projectName := fs.String("project", "", "filter by project name (optional — omit for all projects)")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("parse flags: %w", err)
+	}
+
+	store, err := cache.Open()
+	if err != nil {
+		return fmt.Errorf("open cache: %w", err)
+	}
+	defer store.Close()
+
+	// Resolve project name → project ID if provided.
+	projectID := ""
+	if strings.TrimSpace(*projectName) != "" {
+		cfg, err := brainconfig.Load()
+		if err != nil {
+			return fmt.Errorf("load config: %w", err)
+		}
+		project, ok := cfg.Projects[strings.TrimSpace(*projectName)]
+		if !ok {
+			return fmt.Errorf("project %q not found — run 'brain projects' to list registered projects", *projectName)
+		}
+		projectID = strings.TrimSpace(project.ProjectID)
+	}
+
+	stats, err := store.GetEventStats(projectID)
+	if err != nil {
+		return fmt.Errorf("get event stats: %w", err)
+	}
+
+	scope := "all projects"
+	if strings.TrimSpace(*projectName) != "" {
+		scope = *projectName
+	}
+
+	fmt.Printf("Local telemetry — %s\n\n", scope)
+
+	if stats.TotalQueries == 0 {
+		fmt.Println("No query events recorded yet.")
+		fmt.Println("Events are recorded each time an MCP tool (search_project_context, explain_flow) is called.")
+		return nil
+	}
+
+	fmt.Printf("Total queries:     %d\n", stats.TotalQueries)
+	fmt.Println()
+
+	fmt.Printf("Source breakdown:\n")
+	fmt.Printf("  OKF (local):     %d  (%.1f%%)\n", stats.OKFHits, stats.OKFHitRate)
+	fmt.Printf("  Cache (local):   %d  (%.1f%%)\n", stats.CacheHits, stats.CacheHitRate)
+	fmt.Printf("  API (remote):    %d  (%.1f%%)\n", stats.APIHits,
+		float64(stats.APIHits)/float64(stats.TotalQueries)*100)
+	fmt.Println()
+
+	localRate := stats.OKFHitRate + stats.CacheHitRate
+	fmt.Printf("Local resolution:  %.1f%% (queries answered without API call)\n", localRate)
+	fmt.Printf("Avg latency:       %.0fms\n", stats.AvgLatencyMs)
+
+	if stats.OKFHits > 0 {
+		fmt.Printf("Avg OKF score:     %.4f\n", stats.AvgOKFScore)
+	}
+
+	fmt.Println()
+	fmt.Println("Interpretation:")
+	fmt.Println("  OKF hit rate:    % of queries resolved by local knowledge bundle (zero API cost)")
+	fmt.Println("  Cache hit rate:  % of queries served from local SQLite cache (zero API cost)")
+	fmt.Println("  A high local resolution % means your OKF bundle + cache are working well.")
+
+	dbPath, _ := cache.DBPath()
+	fmt.Printf("\nEvent log: %s\n", dbPath)
 	return nil
 }

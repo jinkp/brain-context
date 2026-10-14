@@ -347,6 +347,117 @@ func TestStats_CountsActiveAndExpired(t *testing.T) {
 	}
 }
 
+// ── Telemetry — RecordEvent / GetEventStats ───────────────────────────────────
+
+func TestRecordEvent_OKFHit(t *testing.T) {
+	store := openTestStore(t)
+
+	store.RecordEvent(cache.QueryEvent{
+		ProjectID: "proj-tele",
+		ToolName:  "search_project_context",
+		Source:    cache.SourceOKF,
+		OKFScore:  1.234,
+		LatencyMs: 5,
+	})
+
+	stats, err := store.GetEventStats("proj-tele")
+	if err != nil {
+		t.Fatalf("GetEventStats: %v", err)
+	}
+	if stats.TotalQueries != 1 {
+		t.Errorf("TotalQueries: got %d, want 1", stats.TotalQueries)
+	}
+	if stats.OKFHits != 1 {
+		t.Errorf("OKFHits: got %d, want 1", stats.OKFHits)
+	}
+	if stats.OKFHitRate != 100.0 {
+		t.Errorf("OKFHitRate: got %.1f, want 100.0", stats.OKFHitRate)
+	}
+	if stats.AvgOKFScore <= 0 {
+		t.Errorf("AvgOKFScore: got %f, want > 0", stats.AvgOKFScore)
+	}
+}
+
+func TestGetEventStats_SourceBreakdown(t *testing.T) {
+	store := openTestStore(t)
+
+	events := []cache.QueryEvent{
+		{ProjectID: "proj-br", ToolName: "search_project_context", Source: cache.SourceOKF, OKFScore: 1.5, LatencyMs: 3},
+		{ProjectID: "proj-br", ToolName: "search_project_context", Source: cache.SourceOKF, OKFScore: 0.8, LatencyMs: 4},
+		{ProjectID: "proj-br", ToolName: "explain_flow", Source: cache.SourceCache, LatencyMs: 2},
+		{ProjectID: "proj-br", ToolName: "search_project_context", Source: cache.SourceAPI, LatencyMs: 120},
+		{ProjectID: "proj-br", ToolName: "search_project_context", Source: cache.SourceAPI, LatencyMs: 95},
+	}
+	for _, e := range events {
+		store.RecordEvent(e)
+	}
+
+	stats, err := store.GetEventStats("proj-br")
+	if err != nil {
+		t.Fatalf("GetEventStats: %v", err)
+	}
+	if stats.TotalQueries != 5 {
+		t.Errorf("TotalQueries: got %d, want 5", stats.TotalQueries)
+	}
+	if stats.OKFHits != 2 {
+		t.Errorf("OKFHits: got %d, want 2", stats.OKFHits)
+	}
+	if stats.CacheHits != 1 {
+		t.Errorf("CacheHits: got %d, want 1", stats.CacheHits)
+	}
+	if stats.APIHits != 2 {
+		t.Errorf("APIHits: got %d, want 2", stats.APIHits)
+	}
+	if stats.OKFHitRate != 40.0 {
+		t.Errorf("OKFHitRate: got %.1f, want 40.0", stats.OKFHitRate)
+	}
+	if stats.CacheHitRate != 20.0 {
+		t.Errorf("CacheHitRate: got %.1f, want 20.0", stats.CacheHitRate)
+	}
+	if stats.AvgLatencyMs <= 0 {
+		t.Errorf("AvgLatencyMs: got %.1f, want > 0", stats.AvgLatencyMs)
+	}
+}
+
+func TestGetEventStats_AllProjects(t *testing.T) {
+	store := openTestStore(t)
+
+	store.RecordEvent(cache.QueryEvent{ProjectID: "proj-1", ToolName: "search_project_context", Source: cache.SourceOKF, LatencyMs: 5})
+	store.RecordEvent(cache.QueryEvent{ProjectID: "proj-2", ToolName: "explain_flow", Source: cache.SourceAPI, LatencyMs: 100})
+	store.RecordEvent(cache.QueryEvent{ProjectID: "proj-2", ToolName: "search_project_context", Source: cache.SourceCache, LatencyMs: 3})
+
+	all, err := store.GetEventStats("")
+	if err != nil {
+		t.Fatalf("GetEventStats all: %v", err)
+	}
+	if all.TotalQueries != 3 {
+		t.Errorf("all projects TotalQueries: got %d, want 3", all.TotalQueries)
+	}
+
+	p1, err := store.GetEventStats("proj-1")
+	if err != nil {
+		t.Fatalf("GetEventStats proj-1: %v", err)
+	}
+	if p1.TotalQueries != 1 {
+		t.Errorf("proj-1 TotalQueries: got %d, want 1", p1.TotalQueries)
+	}
+}
+
+func TestGetEventStats_EmptyReturnsZero(t *testing.T) {
+	store := openTestStore(t)
+
+	stats, err := store.GetEventStats("no-events-project")
+	if err != nil {
+		t.Fatalf("GetEventStats: %v", err)
+	}
+	if stats.TotalQueries != 0 {
+		t.Errorf("expected 0 total queries for empty project, got %d", stats.TotalQueries)
+	}
+	if stats.OKFHitRate != 0 {
+		t.Errorf("expected 0 OKF hit rate for empty project, got %f", stats.OKFHitRate)
+	}
+}
+
 // ── Prune ─────────────────────────────────────────────────────────────────────
 
 func TestPrune_RemovesOnlyExpired(t *testing.T) {

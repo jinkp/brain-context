@@ -186,6 +186,7 @@ func searchSolutionContextTool() mcpgo.Tool {
 }
 
 func (s *Server) handleSearchProjectContext(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	start := time.Now()
 	projectID, project, err := s.resolveProject(req)
 	if err != nil {
 		return toolError(err), nil
@@ -202,7 +203,8 @@ func (s *Server) handleSearchProjectContext(ctx context.Context, req mcpgo.CallT
 	// Falls back transparently when okfIndex is nil (no bundles registered) or when
 	// the best FTS5 score is below the project's configured threshold (default 0.7).
 	if s.okfIndex != nil {
-		if result, ok := s.okfIndex.Query(ctx, projectID, query, project.OKFThreshold, project.LocalOnly); ok {
+		if result, score, ok := s.okfIndex.Query(ctx, projectID, query, project.OKFThreshold, project.LocalOnly); ok {
+			s.recordEvent(projectID, "search_project_context", cache.SourceOKF, score, start)
 			return textResult(result), nil
 		}
 	}
@@ -218,6 +220,7 @@ func (s *Server) handleSearchProjectContext(ctx context.Context, req mcpgo.CallT
 		state, cacheResult, hit := s.cacheGet(ctx, projectID, project, "search_project_context",
 			query, map[string]any{"max_chunks": maxChunks})
 		if hit {
+			s.recordEvent(projectID, "search_project_context", cache.SourceCache, 0, start)
 			return textResult(cacheResult), nil
 		}
 		result, err := s.searchContext(ctx, projectID, project, query, maxChunks, false)
@@ -226,6 +229,7 @@ func (s *Server) handleSearchProjectContext(ctx context.Context, req mcpgo.CallT
 		}
 		s.cachePut(projectID, "search_project_context", query,
 			map[string]any{"max_chunks": maxChunks}, state, result)
+		s.recordEvent(projectID, "search_project_context", cache.SourceAPI, 0, start)
 		return textResult(result), nil
 	}
 
@@ -233,10 +237,12 @@ func (s *Server) handleSearchProjectContext(ctx context.Context, req mcpgo.CallT
 	if err != nil {
 		return toolError(err), nil
 	}
+	s.recordEvent(projectID, "search_project_context", cache.SourceAPI, 0, start)
 	return textResult(result), nil
 }
 
 func (s *Server) handleExplainFlow(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	start := time.Now()
 	projectID, project, err := s.resolveProject(req)
 	if err != nil {
 		return toolError(err), nil
@@ -252,7 +258,8 @@ func (s *Server) handleExplainFlow(ctx context.Context, req mcpgo.CallToolReques
 	// Falls back transparently when okfIndex is nil (no bundles registered) or when
 	// the best FTS5 score is below the project's configured threshold (default 0.7).
 	if s.okfIndex != nil {
-		if result, ok := s.okfIndex.Query(ctx, projectID, query, project.OKFThreshold, project.LocalOnly); ok {
+		if result, score, ok := s.okfIndex.Query(ctx, projectID, query, project.OKFThreshold, project.LocalOnly); ok {
+			s.recordEvent(projectID, "explain_flow", cache.SourceOKF, score, start)
 			return textResult(result), nil
 		}
 	}
@@ -266,6 +273,7 @@ func (s *Server) handleExplainFlow(ctx context.Context, req mcpgo.CallToolReques
 	if s.cacheStore != nil {
 		state, cacheResult, hit := s.cacheGet(ctx, projectID, project, "explain_flow", query, nil)
 		if hit {
+			s.recordEvent(projectID, "explain_flow", cache.SourceCache, 0, start)
 			return textResult(cacheResult), nil
 		}
 		result, err := s.searchContext(ctx, projectID, project, query, 20, true)
@@ -274,6 +282,7 @@ func (s *Server) handleExplainFlow(ctx context.Context, req mcpgo.CallToolReques
 		}
 		formatted := strings.Replace(result, "## Relevant Context", "## Flow Explanation", 1)
 		s.cachePut(projectID, "explain_flow", query, nil, state, formatted)
+		s.recordEvent(projectID, "explain_flow", cache.SourceAPI, 0, start)
 		return textResult(formatted), nil
 	}
 
@@ -281,6 +290,7 @@ func (s *Server) handleExplainFlow(ctx context.Context, req mcpgo.CallToolReques
 	if err != nil {
 		return toolError(err), nil
 	}
+	s.recordEvent(projectID, "explain_flow", cache.SourceAPI, 0, start)
 	return textResult(strings.Replace(result, "## Relevant Context", "## Flow Explanation", 1)), nil
 }
 
@@ -1024,4 +1034,20 @@ func (s *Server) cachePut(projectID, toolName, query string, params map[string]a
 		return
 	}
 	_ = s.cacheStore.Put(key, responseText, cache.DefaultTTL)
+}
+
+// recordEvent records a query event for local telemetry. Silently no-ops when
+// cacheStore is nil (advisory). start is the time.Now() captured before the
+// query began, used to compute latency_ms.
+func (s *Server) recordEvent(projectID string, toolName string, source cache.QuerySource, okfScore float64, start time.Time) {
+	if s.cacheStore == nil {
+		return
+	}
+	s.cacheStore.RecordEvent(cache.QueryEvent{
+		ProjectID: projectID,
+		ToolName:  toolName,
+		Source:    source,
+		OKFScore:  okfScore,
+		LatencyMs: time.Since(start).Milliseconds(),
+	})
 }

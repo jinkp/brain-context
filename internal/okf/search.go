@@ -60,17 +60,17 @@ type searchResult struct {
 }
 
 // Query runs OKF-first search for a project.
-// Returns (formatted result, true) when the best concept's BM25 score >= threshold.
-// Returns ("", false) on miss or when idx is nil.
+// Returns (formatted result, bm25Score, true) when the best concept's BM25 score >= threshold.
+// Returns ("", 0, false) on miss or when idx is nil.
 // localOnly=true applies a much lower default threshold suited for small private bundles.
-func (idx *Index) Query(_ context.Context, projectID, query string, threshold float64, localOnly bool) (string, bool) {
+func (idx *Index) Query(_ context.Context, projectID, query string, threshold float64, localOnly bool) (string, float64, bool) {
 	if idx == nil {
-		return "", false
+		return "", 0, false
 	}
 
 	bundles, ok := idx.bundles[projectID]
 	if !ok || len(bundles) == 0 {
-		return "", false
+		return "", 0, false
 	}
 
 	effectiveThreshold := threshold
@@ -122,16 +122,16 @@ func (idx *Index) Query(_ context.Context, projectID, query string, threshold fl
 	}
 
 	if best == nil {
-		return "", false
+		return "", 0, false
 	}
 
 	// Threshold gate: FTS5 bm25() returns negative; we negate it so higher = better.
 	// A score below the threshold means the match isn't confident enough.
 	if best.bm25Score < effectiveThreshold {
-		return "", false
+		return "", 0, false
 	}
 
-	return formatOKFResult(*best), true
+	return formatOKFResult(*best), best.bm25Score, true
 }
 
 // isBetter returns true if candidate ranks higher than current.

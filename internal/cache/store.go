@@ -152,13 +152,126 @@ CREATE TABLE IF NOT EXISTS query_cache (
     expires_at             TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS query_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id  TEXT    NOT NULL,
+    tool_name   TEXT    NOT NULL,
+    source      TEXT    NOT NULL, -- 'okf' | 'cache' | 'api'
+    okf_score   REAL,             -- BM25 score when source='okf', NULL otherwise
+    latency_ms  INTEGER NOT NULL,
+    created_at  TEXT    NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_query_cache_project ON query_cache(project_id);
-CREATE INDEX IF NOT EXISTS idx_query_cache_expires ON query_cache(expires_at);
+CREATE INDEX IF NOT EXISTS idx_query_cache_expires  ON query_cache(expires_at);
+CREATE INDEX IF NOT EXISTS idx_query_events_project ON query_events(project_id);
+CREATE INDEX IF NOT EXISTS idx_query_events_created ON query_events(created_at);
 `
 	if _, err := s.db.Exec(ddl); err != nil {
 		return fmt.Errorf("apply schema: %w", err)
 	}
 	return nil
+}
+
+// ── Telemetry ─────────────────────────────────────────────────────────────────
+
+// QuerySource identifies where a query response came from.
+type QuerySource string
+
+const (
+	SourceOKF   QuerySource = "okf"
+	SourceCache QuerySource = "cache"
+	SourceAPI   QuerySource = "api"
+)
+
+// QueryEvent records one MCP tool call for local telemetry.
+type QueryEvent struct {
+	ProjectID string
+	ToolName  string
+	Source    QuerySource
+	OKFScore  float64 // non-zero only when Source == SourceOKF
+	LatencyMs int64
+}
+
+// RecordEvent persists a query event. Errors are silently dropped — telemetry
+// must never affect the query path.
+func (s *Store) RecordEvent(e QueryEvent) {
+	if s == nil {
+		return
+	}
+	var okfScore any
+	if e.Source == SourceOKF && e.OKFScore > 0 {
+		okfScore = e.OKFScore
+	}
+	_, _ = s.db.Exec(
+		`INSERT INTO query_events (project_id, tool_name, source, okf_score, latency_ms, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		e.ProjectID, e.ToolName, string(e.Source), okfScore, e.LatencyMs,
+		time.Now().UTC().Format(time.RFC3339),
+	)
+}
+
+// EventStats holds aggregated telemetry for a project (or all projects).
+type EventStats struct {
+	ProjectID    string // empty = all projects
+	TotalQueries int64
+	OKFHits      int64
+	CacheHits    int64
+	APIHits      int64
+	OKFHitRate   float64 // 0-100 %
+	CacheHitRate float64 // 0-100 %
+	AvgLatencyMs float64
+	AvgOKFScore  float64
+}
+
+// GetEventStats returns aggregated telemetry.
+// Pass projectID="" to aggregate across all projects.
+func (s *Store) GetEventStats(projectID string) (EventStats, error) {
+	stats := EventStats{ProjectID: projectID}
+
+	where := ""
+	args := []any{}
+	if projectID != "" {
+		where = "WHERE project_id = ?"
+		args = append(args, projectID)
+	}
+
+	q := fmt.Sprintf(`
+SELECT
+    COUNT(*)                                                              AS total,
+    COALESCE(SUM(CASE WHEN source = 'okf'   THEN 1 ELSE 0 END), 0)     AS okf_hits,
+    COALESCE(SUM(CASE WHEN source = 'cache' THEN 1 ELSE 0 END), 0)     AS cache_hits,
+    COALESCE(SUM(CASE WHEN source = 'api'   THEN 1 ELSE 0 END), 0)     AS api_hits,
+    AVG(latency_ms)                                                       AS avg_latency,
+    AVG(CASE WHEN source = 'okf' THEN okf_score END)                    AS avg_okf_score
+FROM query_events %s`, where)
+
+	row := s.db.QueryRow(q, args...)
+
+	var avgLatency, avgOKFScore sql.NullFloat64
+	err := row.Scan(
+		&stats.TotalQueries,
+		&stats.OKFHits,
+		&stats.CacheHits,
+		&stats.APIHits,
+		&avgLatency,
+		&avgOKFScore,
+	)
+	if err != nil && err != sql.ErrNoRows {
+		return stats, fmt.Errorf("query event stats: %w", err)
+	}
+
+	if avgLatency.Valid {
+		stats.AvgLatencyMs = avgLatency.Float64
+	}
+	if avgOKFScore.Valid {
+		stats.AvgOKFScore = avgOKFScore.Float64
+	}
+	if stats.TotalQueries > 0 {
+		stats.OKFHitRate = float64(stats.OKFHits) / float64(stats.TotalQueries) * 100
+		stats.CacheHitRate = float64(stats.CacheHits) / float64(stats.TotalQueries) * 100
+	}
+	return stats, nil
 }
 
 // UpsertProjectState persists (or replaces) the freshness metadata for a project.
