@@ -410,6 +410,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  brain projects rename --project <old> --name <new>  rename a project")
 	fmt.Fprintln(os.Stderr, "  brain scan           --project <name> [--stack <stack>]  preview which files would be indexed")
 	fmt.Fprintln(os.Stderr, "  brain key set        --project <name|.>  --embed-api-key <key>  update embed API key")
+	fmt.Fprintln(os.Stderr, "  brain key status     --project <name|.>                         check embed API key status")
 	fmt.Fprintln(os.Stderr, "  brain metrics        [--from YYYY-MM-DD] [--to YYYY-MM-DD]      server usage analytics")
 	fmt.Fprintln(os.Stderr, "  brain metrics local  [--project <name>]                         local OKF/cache hit rates")
 	fmt.Fprintln(os.Stderr, "  brain mcp            [--project <name>]")
@@ -1077,10 +1078,10 @@ func runProjectsList() error {
 	}
 
 	fmt.Printf("Registered projects (%d):\n\n", len(cfg.Projects))
-	fmt.Printf("  %-20s  %-36s  %-20s  %s\n", "NAME", "ID", "LAST INDEXED", "EMBEDDER")
-	fmt.Printf("  %-20s  %-36s  %-20s  %s\n",
+	fmt.Printf("  %-20s  %-36s  %-20s  %-34s  %s\n", "NAME", "ID", "LAST INDEXED", "EMBEDDER", "KEY")
+	fmt.Printf("  %-20s  %-36s  %-20s  %-34s  %s\n",
 		"────────────────────", "────────────────────────────────────",
-		"────────────────────", "────────────────────────────")
+		"────────────────────", "──────────────────────────────────", "───")
 
 	for name, project := range cfg.Projects {
 		embedModel := project.EmbedModel
@@ -1101,9 +1102,17 @@ func runProjectsList() error {
 			}
 		}
 
-		fmt.Printf("  %-20s  %-36s  %-20s  %s\n", name, id, lastIndexed, embedModel)
+		// Local key status — ✓ present, ✗ missing.
+		// Note: brain join users won't have the key locally (read-only access).
+		keyStatus := "✗ not set"
+		if strings.TrimSpace(project.EmbedAPIKey) != "" {
+			keyStatus = "✓ set"
+		}
+
+		fmt.Printf("  %-20s  %-36s  %-20s  %-34s  %s\n", name, id, lastIndexed, embedModel, keyStatus)
 	}
 	fmt.Println()
+	fmt.Println("  KEY column shows local config state. Run 'brain key status --project <name>' for server verification.")
 	return nil
 }
 
@@ -2761,18 +2770,24 @@ func runMetricsLocal(args []string) error {
 
 func runKey(args []string) error {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage:")
-		fmt.Fprintln(os.Stderr, "  brain key set  --project <name|.>  --embed-api-key <key>")
+		printKeyUsage()
 		return nil
 	}
 	switch args[0] {
 	case "set":
 		return runKeySet(args[1:])
+	case "status":
+		return runKeyStatus(args[1:])
 	default:
-		fmt.Fprintln(os.Stderr, "usage:")
-		fmt.Fprintln(os.Stderr, "  brain key set  --project <name|.>  --embed-api-key <key>")
+		printKeyUsage()
 		return nil
 	}
+}
+
+func printKeyUsage() {
+	fmt.Fprintln(os.Stderr, "usage:")
+	fmt.Fprintln(os.Stderr, "  brain key set     --project <name|.>  --embed-api-key <key>")
+	fmt.Fprintln(os.Stderr, "  brain key status  --project <name|.>")
 }
 
 func runKeySet(args []string) error {
@@ -2857,5 +2872,100 @@ func runKeySet(args []string) error {
 	fmt.Println("  Local:  config updated ✓")
 	fmt.Println()
 	fmt.Println("Run 'brain update' to re-index with the new key.")
+	return nil
+}
+
+func runKeyStatus(args []string) error {
+	fs := flag.NewFlagSet("key status", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	projectFlag := fs.String("project", ".", "project name, or '.' to auto-detect from current directory")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("parse flags: %w", err)
+	}
+
+	projectName, err := resolveProjectName(*projectFlag)
+	if err != nil {
+		return err
+	}
+
+	cfg, err := brainconfig.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	project, ok := cfg.Projects[projectName]
+	if !ok {
+		return fmt.Errorf("project %q not found", projectName)
+	}
+
+	fmt.Printf("Embed API key status for project %q\n\n", projectName)
+
+	// ── Local ──────────────────────────────────────────────────────────────────
+	localStatus := "✗  not set"
+	if strings.TrimSpace(project.EmbedAPIKey) != "" {
+		localStatus = "✓  set"
+	}
+	fmt.Printf("  Local config:   %s\n", localStatus)
+
+	// ── Server ─────────────────────────────────────────────────────────────────
+	if strings.TrimSpace(cfg.TenantToken) == "" || strings.TrimSpace(project.ProjectID) == "" {
+		fmt.Printf("  Server:         (skipped — not logged in or no project ID)\n")
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	endpoint := strings.TrimRight(cfg.APIEndpoint, "/") + "/api/projects/" + project.ProjectID + "/embed-key/status"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		fmt.Printf("  Server:         (could not build request: %v)\n", err)
+		return nil
+	}
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(cfg.TenantToken))
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		fmt.Printf("  Server:         (unreachable: %v)\n", err)
+		return nil
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode >= 400 {
+		fmt.Printf("  Server:         (error %s)\n", resp.Status)
+		return nil
+	}
+
+	var status struct {
+		HasKey           bool `json:"has_key"`
+		EncryptionActive bool `json:"encryption_active"`
+	}
+	if err := json.Unmarshal(data, &status); err != nil {
+		fmt.Printf("  Server:         (could not parse response)\n")
+		return nil
+	}
+
+	serverStatus := "✗  not set"
+	if status.HasKey {
+		serverStatus = "✓  set (encrypted)"
+	}
+	fmt.Printf("  Server:         %s\n", serverStatus)
+
+	encStatus := "✗  not configured"
+	if status.EncryptionActive {
+		encStatus = "✓  configured"
+	}
+	fmt.Printf("  Encryption:     %s\n", encStatus)
+
+	fmt.Println()
+	if !status.HasKey {
+		fmt.Println("  → Run 'brain key set --embed-api-key <key>' to configure the embed API key.")
+	} else if !status.EncryptionActive {
+		fmt.Println("  ⚠  Server encryption is not configured (BRAIN_ENCRYPTION_KEY missing).")
+		fmt.Println("     The key is stored but cannot be used for server-side embedding.")
+	} else {
+		fmt.Println("  Ready. Run 'brain update' to re-index if you recently changed the key.")
+	}
 	return nil
 }

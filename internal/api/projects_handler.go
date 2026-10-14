@@ -139,6 +139,35 @@ func (h *Handler) UpdateEmbedKey(c echo.Context) error {
 	})
 }
 
+// GetEmbedKeyStatus reports whether an embed API key is stored for a project.
+// GET /api/projects/:id/embed-key/status
+// Returns {"has_key": bool} — never reveals the key itself.
+func (h *Handler) GetEmbedKeyStatus(c echo.Context) error {
+	tenantID, ok := tenantIDFromContext(c)
+	if !ok {
+		return writeError(c, http.StatusUnauthorized, "UNAUTHORIZED", "missing tenant context")
+	}
+
+	projectID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return writeError(c, http.StatusBadRequest, "VALIDATION_ERROR", "invalid project id")
+	}
+
+	key, err := h.store.GetEmbedAPIKey(c.Request().Context(), tenantID, projectID)
+	if err != nil {
+		// GetEmbedAPIKey returns an error when no key row exists — treat as not set.
+		return c.JSON(http.StatusOK, map[string]any{
+			"has_key":           false,
+			"encryption_active": crypto.IsConfigured(),
+		})
+	}
+
+	return c.JSON(http.StatusOK, map[string]any{
+		"has_key":           strings.TrimSpace(key) != "",
+		"encryption_active": crypto.IsConfigured(),
+	})
+}
+
 func (h *Handler) RenameProject(c echo.Context) error {
 	tenantID, ok := tenantIDFromContext(c)
 	if !ok {
