@@ -16,6 +16,7 @@ import (
 	"time"
 
 	brainconfig "github.com/Gentleman-Programming/brain-context/internal/config"
+	"github.com/Gentleman-Programming/brain-context/internal/cache"
 	"github.com/Gentleman-Programming/brain-context/internal/retriever"
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 )
@@ -211,6 +212,23 @@ func (s *Server) handleSearchProjectContext(ctx context.Context, req mcpgo.CallT
 		return textResult("No matching context found in local knowledge bundle."), nil
 	}
 
+	// Local query cache — check before calling the API.
+	// Advisory only: on any cache error we fall through to the API transparently.
+	if s.cacheStore != nil {
+		state, cacheResult, hit := s.cacheGet(ctx, projectID, project, "search_project_context",
+			query, map[string]any{"max_chunks": maxChunks})
+		if hit {
+			return textResult(cacheResult), nil
+		}
+		result, err := s.searchContext(ctx, projectID, project, query, maxChunks, false)
+		if err != nil {
+			return toolError(err), nil
+		}
+		s.cachePut(projectID, "search_project_context", query,
+			map[string]any{"max_chunks": maxChunks}, state, result)
+		return textResult(result), nil
+	}
+
 	result, err := s.searchContext(ctx, projectID, project, query, maxChunks, false)
 	if err != nil {
 		return toolError(err), nil
@@ -242,6 +260,21 @@ func (s *Server) handleExplainFlow(ctx context.Context, req mcpgo.CallToolReques
 	// local_only projects have no RAG index — return empty on OKF miss.
 	if project.LocalOnly {
 		return textResult("No matching context found in local knowledge bundle."), nil
+	}
+
+	// Local query cache — check before calling the API.
+	if s.cacheStore != nil {
+		state, cacheResult, hit := s.cacheGet(ctx, projectID, project, "explain_flow", query, nil)
+		if hit {
+			return textResult(cacheResult), nil
+		}
+		result, err := s.searchContext(ctx, projectID, project, query, 20, true)
+		if err != nil {
+			return toolError(err), nil
+		}
+		formatted := strings.Replace(result, "## Relevant Context", "## Flow Explanation", 1)
+		s.cachePut(projectID, "explain_flow", query, nil, state, formatted)
+		return textResult(formatted), nil
 	}
 
 	result, err := s.searchContext(ctx, projectID, project, query, 20, true)
@@ -955,4 +988,40 @@ func displayValue(value string) string {
 		return "unknown"
 	}
 	return strings.TrimSpace(value)
+}
+
+// cacheGet attempts to return a cached response for the given tool + query + params.
+// It first fetches (or derives) the remote project state to validate freshness.
+// Returns (state, text, true) on a hit, or (state, "", false) on a miss or any error.
+// All failures are silent — the caller must fall back to the API.
+func (s *Server) cacheGet(ctx context.Context, projectID string, project brainconfig.ProjectConfig, toolName, query string, params map[string]any) (cache.ProjectState, string, bool) {
+	state, err := cache.FetchProjectState(ctx, s.httpClient, s.apiEndpoint, projectID, project.MCPReadKey)
+	if err != nil {
+		// Cannot prove freshness — bypass cache entirely.
+		return cache.ProjectState{}, "", false
+	}
+
+	// Persist the latest state for CLI inspection commands (brain cache status).
+	_ = s.cacheStore.UpsertProjectState(state)
+
+	key, err := cache.BuildKey(projectID, toolName, query, params, state)
+	if err != nil {
+		return state, "", false
+	}
+
+	text, hit, err := s.cacheStore.Get(key)
+	if err != nil || !hit {
+		return state, "", false
+	}
+	return state, text, true
+}
+
+// cachePut stores a response in the local cache. All errors are silently ignored —
+// the cache is advisory and a write failure must not affect the caller.
+func (s *Server) cachePut(projectID, toolName, query string, params map[string]any, state cache.ProjectState, responseText string) {
+	key, err := cache.BuildKey(projectID, toolName, query, params, state)
+	if err != nil {
+		return
+	}
+	_ = s.cacheStore.Put(key, responseText, cache.DefaultTTL)
 }

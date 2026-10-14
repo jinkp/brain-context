@@ -8,6 +8,7 @@ import (
 	"time"
 
 	brainconfig "github.com/Gentleman-Programming/brain-context/internal/config"
+	"github.com/Gentleman-Programming/brain-context/internal/cache"
 	"github.com/Gentleman-Programming/brain-context/internal/okf"
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -27,7 +28,8 @@ type Server struct {
 	projectsByName   map[string]string                     // name → project_id
 	solutionsByName  map[string]brainconfig.SolutionConfig // lowercase name → SolutionConfig
 	httpClient       *http.Client
-	okfIndex         *okf.Index // nil when no OKF bundles are registered
+	okfIndex         *okf.Index   // nil when no OKF bundles are registered
+	cacheStore       *cache.Store // nil when cache open fails (advisory, non-fatal)
 }
 
 func New(defaultProjectName string) (*Server, error) {
@@ -76,6 +78,14 @@ func New(defaultProjectName string) (*Server, error) {
 		fmt.Fprintf(os.Stderr, "[brain-context] OKF index load warning: %v\n", err)
 	} else {
 		srv.okfIndex = idx
+	}
+
+	// Local query cache — non-fatal if it fails (nil store = cache bypassed transparently)
+	cacheStore, err := cache.Open()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[brain-context] local cache open warning: %v\n", err)
+	} else {
+		srv.cacheStore = cacheStore
 	}
 
 	return srv, nil

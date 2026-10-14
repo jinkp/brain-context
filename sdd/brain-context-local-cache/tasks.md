@@ -1,23 +1,23 @@
 # Tasks: brain-context-local-cache
 
-<!-- Status: NO INICIADO -->
+<!-- Status: PHASE 1 COMPLETADA -->
 <!-- Prioridad: BAJA — OKF V2 (server sync) tiene más impacto primero -->
 <!-- Prerequisito: OKF V2 completado antes de evaluar si local-cache sigue siendo necesario -->
 
-## Phase 1: Local Query Cache MVP
+## Phase 1: Local Query Cache MVP ✅
 
-- [ ] 1.1 Add a dedicated local cache package for read-path persistence, separate from `internal/embedder` and `internal/indexer`
-- [ ] 1.2 Define SQLite schema for `project_state` and `query_cache`
-- [ ] 1.3 Add local cache path resolution under `~/.brain/context-cache.db`
-- [ ] 1.4 Add cache-key builder that includes project, tool, normalized query, tool parameters, and freshness metadata
-- [ ] 1.5 Add a lightweight remote project state read path that returns `last_indexed`, `embed_model`, and `embed_dimensions`
-- [ ] 1.6 Integrate query cache lookup/write into `search_project_context`
-- [ ] 1.7 Integrate query cache lookup/write into `explain_flow`
-- [ ] 1.8 Add TTL handling and stale-entry bypass logic
-- [ ] 1.9 Add `brain cache status --project <name>` CLI command
-- [ ] 1.10 Add `brain cache clear --project <name>` CLI command
-- [ ] 1.11 Add `brain cache prune` CLI command for expired entries
-- [ ] 1.12 Add tests for cache hits, stale bypass, parameter-sensitive keys, and project-scoped clearing
+- [x] 1.1 Add a dedicated local cache package for read-path persistence, separate from `internal/embedder` and `internal/indexer`
+- [x] 1.2 Define SQLite schema for `project_state` and `query_cache`
+- [x] 1.3 Add local cache path resolution under `~/.brain/context-cache.db`
+- [x] 1.4 Add cache-key builder that includes project, tool, normalized query, tool parameters, and freshness metadata
+- [x] 1.5 Add a lightweight remote project state read path that returns `last_indexed`, `embed_model`, and `embed_dimensions`
+- [x] 1.6 Integrate query cache lookup/write into `search_project_context`
+- [x] 1.7 Integrate query cache lookup/write into `explain_flow`
+- [x] 1.8 Add TTL handling and stale-entry bypass logic
+- [x] 1.9 Add `brain cache status --project <name>` CLI command
+- [x] 1.10 Add `brain cache clear --project <name>` CLI command
+- [x] 1.11 Add `brain cache prune` CLI command for expired entries
+- [x] 1.12 Add tests for cache hits, stale bypass, parameter-sensitive keys, and project-scoped clearing
 
 ## Phase 2: Warmup and Chunk Reuse
 

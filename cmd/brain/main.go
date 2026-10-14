@@ -16,6 +16,7 @@ import (
 	"time"
 	// filepath used in runSetup via Abs
 
+	"github.com/Gentleman-Programming/brain-context/internal/cache"
 	"github.com/Gentleman-Programming/brain-context/internal/chunker"
 	brainconfig "github.com/Gentleman-Programming/brain-context/internal/config"
 	braincrypto "github.com/Gentleman-Programming/brain-context/internal/crypto"
@@ -103,6 +104,8 @@ func main() {
 		err = runMetrics(os.Args[2:])
 	case "okf":
 		err = runOKF(os.Args[2:])
+	case "cache":
+		err = runCache(os.Args[2:])
 	case "solution":
 		err = runSolution(os.Args[2:])
 	case "version":
@@ -410,6 +413,9 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  brain okf generate   --project <name>")
 	fmt.Fprintln(os.Stderr, "  brain okf list       --project <name> [--status draft|stable|deprecated] [--stale]")
 	fmt.Fprintln(os.Stderr, "  brain okf validate   --project <name> [--refs]")
+	fmt.Fprintln(os.Stderr, "  brain cache status   --project <name>  show local cache entries for a project")
+	fmt.Fprintln(os.Stderr, "  brain cache clear    --project <name>  delete local cache entries for a project")
+	fmt.Fprintln(os.Stderr, "  brain cache prune                      delete all expired cache entries")
 	fmt.Fprintln(os.Stderr, "  brain tui                       interactive TUI (wizard, client setup, update)")
 	fmt.Fprintln(os.Stderr, "  brain tui clients               TUI — client selection only")
 	fmt.Fprintln(os.Stderr, "  brain tui <client>              direct: opencode, claude, cursor, gemini, windsurf, all")
@@ -2478,5 +2484,155 @@ func runOKFValidate(args []string) error {
 	if errors > 0 {
 		return fmt.Errorf("validation failed: %d error(s)", errors)
 	}
+	return nil
+}
+
+// ── cache ─────────────────────────────────────────────────────────────────────
+
+func runCache(args []string) error {
+	if len(args) == 0 {
+		printCacheUsage()
+		return nil
+	}
+	switch args[0] {
+	case "status":
+		return runCacheStatus(args[1:])
+	case "clear":
+		return runCacheClear(args[1:])
+	case "prune":
+		return runCachePrune(args[1:])
+	default:
+		printCacheUsage()
+		return nil
+	}
+}
+
+func printCacheUsage() {
+	fmt.Fprintln(os.Stderr, "usage:")
+	fmt.Fprintln(os.Stderr, "  brain cache status  --project <name>   show local cache entries for a project")
+	fmt.Fprintln(os.Stderr, "  brain cache clear   --project <name>   delete local cache entries for a project")
+	fmt.Fprintln(os.Stderr, "  brain cache prune                      delete all expired cache entries")
+}
+
+func runCacheStatus(args []string) error {
+	fs := flag.NewFlagSet("cache status", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	projectName := fs.String("project", "", "project name")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("parse flags: %w", err)
+	}
+	if strings.TrimSpace(*projectName) == "" {
+		return fmt.Errorf("--project is required")
+	}
+
+	store, err := cache.Open()
+	if err != nil {
+		return fmt.Errorf("open cache: %w", err)
+	}
+	defer store.Close()
+
+	// Resolve project name → project ID via config.
+	cfg, err := brainconfig.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	project, ok := cfg.Projects[strings.TrimSpace(*projectName)]
+	if !ok {
+		return fmt.Errorf("project %q not found — run 'brain projects' to list registered projects", *projectName)
+	}
+	projectID := strings.TrimSpace(project.ProjectID)
+
+	stats, err := store.Stats(projectID)
+	if err != nil {
+		return fmt.Errorf("get cache stats: %w", err)
+	}
+
+	state, err := store.GetProjectState(projectID)
+	if err != nil {
+		return fmt.Errorf("get project state: %w", err)
+	}
+
+	fmt.Printf("Local cache status for project: %s\n", *projectName)
+	fmt.Printf("  Project ID:    %s\n", projectID)
+	fmt.Printf("  Total entries: %d\n", stats.TotalCount)
+	fmt.Printf("  Active:        %d\n", stats.ActiveCount)
+	fmt.Printf("  Expired:       %d\n", stats.TotalCount-stats.ActiveCount)
+
+	if !stats.OldestEntry.IsZero() {
+		fmt.Printf("  Oldest entry:  %s\n", stats.OldestEntry.Format(time.RFC3339))
+		fmt.Printf("  Newest entry:  %s\n", stats.NewestEntry.Format(time.RFC3339))
+	}
+
+	if state != nil {
+		fmt.Printf("\nCached project state:\n")
+		fmt.Printf("  Embed model:   %s\n", state.EmbedModel)
+		fmt.Printf("  Dimensions:    %d\n", state.EmbedDimensions)
+		if state.LastIndexed != "" {
+			fmt.Printf("  Last indexed:  %s\n", state.LastIndexed)
+		}
+		fmt.Printf("  State updated: %s\n", state.UpdatedAt.Format(time.RFC3339))
+	} else {
+		fmt.Printf("\nNo cached project state (cache will fetch on next query).\n")
+	}
+
+	dbPath, _ := cache.DBPath()
+	fmt.Printf("\nCache DB: %s\n", dbPath)
+	return nil
+}
+
+func runCacheClear(args []string) error {
+	fs := flag.NewFlagSet("cache clear", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	projectName := fs.String("project", "", "project name")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("parse flags: %w", err)
+	}
+	if strings.TrimSpace(*projectName) == "" {
+		return fmt.Errorf("--project is required")
+	}
+
+	store, err := cache.Open()
+	if err != nil {
+		return fmt.Errorf("open cache: %w", err)
+	}
+	defer store.Close()
+
+	cfg, err := brainconfig.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	project, ok := cfg.Projects[strings.TrimSpace(*projectName)]
+	if !ok {
+		return fmt.Errorf("project %q not found — run 'brain projects' to list registered projects", *projectName)
+	}
+	projectID := strings.TrimSpace(project.ProjectID)
+
+	n, err := store.Clear(projectID)
+	if err != nil {
+		return fmt.Errorf("clear cache: %w", err)
+	}
+	fmt.Printf("Cleared %d cache entries for project %q.\n", n, *projectName)
+	return nil
+}
+
+func runCachePrune(args []string) error {
+	// prune takes no flags, but parse anyway to be consistent.
+	fs := flag.NewFlagSet("cache prune", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("parse flags: %w", err)
+	}
+
+	store, err := cache.Open()
+	if err != nil {
+		return fmt.Errorf("open cache: %w", err)
+	}
+	defer store.Close()
+
+	n, err := store.Prune()
+	if err != nil {
+		return fmt.Errorf("prune cache: %w", err)
+	}
+	fmt.Printf("Pruned %d expired cache entries.\n", n)
 	return nil
 }
