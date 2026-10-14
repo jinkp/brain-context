@@ -1,8 +1,8 @@
 # Tasks: brain-context-local-cache
 
-<!-- Status: NOT STARTED -->
-<!-- Note: The only existing cache is internal/embedder/cache.go — indexing cache (chunk_hash → vector).
-     No query cache package, no context-cache.db, no brain cache commands exist yet. -->
+<!-- Status: NO INICIADO -->
+<!-- Prioridad: BAJA — OKF V2 (server sync) tiene más impacto primero -->
+<!-- Prerequisito: OKF V2 completado antes de evaluar si local-cache sigue siendo necesario -->
 
 ## Phase 1: Local Query Cache MVP
 
